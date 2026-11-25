@@ -108,12 +108,6 @@ pub const SYMBOLS: &[SymbolDef] = &[
 ];
 
 /// Image-relative pointer to the param repository. The flag walks read it, then
-/// step through `+<list>`, `+0x80`, `+0x80` to reach a param list's rows.
-pub const PARAM_PTR: u64 = 0x3C80_158;
-/// Param list the graces ("bonfires") live in.
-pub const BONFIRE_LIST: u64 = 0xCA0;
-/// Param list of summoning-pool sign flags.
-pub const PUDDLE_LIST: u64 = 0x30A0;
 
 /// From the table's itemgib stub: `mov rax, InventoryAccessor+19; mov eax,[rax];
 /// cdqe; mov rcx, InventoryAccessor+1D; add rcx, rax; mov rcx,[rcx]`.

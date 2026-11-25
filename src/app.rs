@@ -1002,18 +1002,41 @@ impl App {
                 let gives = self
                     .script_lib
                     .resolve(script, &self.catalog, self.scripts.include_dlc);
-                let label = if self.scripts.include_dlc {
+                let mut label = if self.scripts.include_dlc {
                     format!("{} (with DLC)", script.name)
                 } else {
                     script.name.to_string()
                 };
+                if let Some(note) = self.ensure_crafting_kit(script) {
+                    label.push_str(&format!(" — {note}"));
+                }
+                // Cookbooks are the same story as maps: the item on its own does
+                // not unlock the recipes, the flags do.
+                let recipes = crate::scripts::unlock_flags(script);
+                if !recipes.is_empty() {
+                    self.run_flag_bytes(terminal, &format!("{label} recipes"), recipes)?;
+                }
                 self.run_gives(terminal, &label, gives)
             }
+            ScriptKind::MaxFlaskNumber => self.run_max_flask_number(),
+            ScriptKind::MaxFlaskCharge => self.run_max_flask_charge(),
             ScriptKind::UnlockGraces => {
-                self.run_flags(terminal, script.name, offsets::BONFIRE_LIST, true)
+                let flags = crate::scripts::grace_flags();
+                self.run_flag_bytes(terminal, script.name, &flags)
             }
             ScriptKind::SummoningPools => {
-                self.run_flags(terminal, script.name, offsets::PUDDLE_LIST, false)
+                let flags = crate::scripts::summoning_pool_flags();
+                self.run_flag_bytes(terminal, script.name, &flags)
+            }
+            ScriptKind::Bosses { dead } => self.run_boss_flags(terminal, script.name, dead),
+            ScriptKind::UnlockTorrent => self.run_unlock_torrent(terminal, script.name),
+            ScriptKind::UnlockRoundtable => {
+                let flags = crate::scripts::ROUNDTABLE_FLAGS;
+                self.run_flag_list(terminal, script.name, &flags)
+            }
+            ScriptKind::RevealMaps => {
+                let flags = crate::scripts::map_reveal_flags();
+                self.run_flag_list(terminal, script.name, &flags)
             }
         }
     }
@@ -1127,29 +1150,176 @@ impl App {
         Ok(())
     }
 
-    /// Set every flag of a param list through the game's setter.
-    fn run_flags(
+    /// Set a block of flag bytes straight into the flag block, the way the
+    /// table's boss entries do. One byte per flag id, no calls into the game, so
+    /// four thousand flags take well under a second.
+    fn run_flag_bytes(
         &mut self,
         terminal: &mut Tui,
         label: &str,
-        list: u64,
-        flag_in_sub: bool,
+        flags: &[u32],
     ) -> std::io::Result<()> {
-        let flags = match self.game.as_ref() {
-            Some(game) => game.param_flag_ids(list, flag_in_sub),
-            None => return Ok(()),
-        };
-        let flags = match flags {
-            Ok(flags) => flags,
-            Err(err) => {
-                self.toast(format!("{label}: {err}"), ToastKind::Bad);
-                return Ok(());
-            }
-        };
         let total = flags.len();
+        if total == 0 {
+            self.toast(format!("{label}: no flags"), ToastKind::Warn);
+            return Ok(());
+        }
         let mut set = 0usize;
         let mut failed = 0usize;
         let mut aborted = false;
+        let mut failure: Option<String> = None;
+        for (i, flag) in flags.iter().enumerate() {
+            let outcome = match self.game.as_ref() {
+                Some(game) => Some(game.set_flag_byte(u64::from(*flag), 1)),
+                None => None,
+            };
+            match outcome {
+                Some(Ok(())) => set += 1,
+                Some(Err(err)) => {
+                    failed += 1;
+                    failure = Some(format!("flag {flag}: {err}"));
+                    break;
+                }
+                None => break,
+            }
+            if i % 256 == 0 || i + 1 == total {
+                self.scripts.progress = Some(Progress {
+                    done: i + 1,
+                    total,
+                    name: format!("flag {flag}"),
+                });
+                terminal.draw(|frame| ui::draw(self, frame))?;
+                if event::poll(Duration::ZERO)? {
+                    if let Event::Key(key) = event::read()? {
+                        match key.code {
+                            KeyCode::Esc => {
+                                aborted = true;
+                                break;
+                            }
+                            KeyCode::Char('q') => {
+                                self.quit = true;
+                                aborted = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        self.scripts.progress = None;
+
+        let mut text = match &failure {
+            Some(reason) => format!("{label}: stopped after {set}/{total} — {reason}"),
+            None => format!("{label}: {set}/{total} flags set"),
+        };
+        if aborted {
+            text.push_str(" — stopped early");
+        }
+        let ok = failed == 0 && !aborted;
+        self.scripts.last = Some((text.clone(), ok));
+        self.toast(text, if ok { ToastKind::Good } else { ToastKind::Warn });
+        self.repoll();
+        Ok(())
+    }
+
+    /// The material list is useless without the crafting kit, and the game
+    /// marks the crafting feature with flag 60120, so that flag is the check:
+    /// when it is off the kit is handed over first.
+    fn ensure_crafting_kit(&mut self, script: &crate::scripts::Script) -> Option<String> {
+        if crate::scripts::prerequisites(script).is_empty() {
+            return None;
+        }
+        let owned = self
+            .game
+            .as_ref()
+            .and_then(|game| game.event_flag_byte(crate::scripts::CRAFTING_KIT_FLAG))
+            .unwrap_or(0)
+            != 0;
+        if owned {
+            return Some("crafting kit already owned".to_string());
+        }
+        let game = self.game.as_ref()?;
+        match game.give_item(Cat::Goods, crate::scripts::CRAFTING_KIT, 1, 0) {
+            Ok(_) => {
+                let _ = game.set_event_flag(crate::scripts::CRAFTING_KIT_FLAG, true);
+                Some("crafting kit given".to_string())
+            }
+            Err(err) => Some(format!("crafting kit refused: {err}")),
+        }
+    }
+
+    /// Top both flasks up to fourteen charges.
+    fn run_max_flask_number(&mut self) -> std::io::Result<()> {
+        let outcome = match self.game.as_ref() {
+            Some(game) => game.max_flask_charges(),
+            None => return Ok(()),
+        };
+        match outcome {
+            Ok((hp, mp)) => {
+                let text = format!(
+                    "flasks: {hp} crimson + {mp} cerulean = {} charges — rest at a grace to refresh",
+                    u32::from(hp) + u32::from(mp)
+                );
+                self.scripts.last = Some((text.clone(), true));
+                self.toast(text, ToastKind::Good);
+            }
+            Err(err) => {
+                self.scripts.last = Some((err.clone(), false));
+                self.toast(err, ToastKind::Bad);
+            }
+        }
+        self.repoll();
+        Ok(())
+    }
+
+    /// Take both flasks to +12 through the game's own routines.
+    fn run_max_flask_charge(&mut self) -> std::io::Result<()> {
+        self.scripts.progress = Some(Progress {
+            done: 0,
+            total: 1,
+            name: "upgrading the flasks".to_string(),
+        });
+        let outcome = match self.game.as_ref() {
+            Some(game) => game.max_flask_charge(),
+            None => return Ok(()),
+        };
+        self.scripts.progress = None;
+        match outcome {
+            Ok((level, swapped)) => {
+                let text = if swapped {
+                    format!("flasks upgraded to +{level} — rest at a grace to save it")
+                } else {
+                    format!("flasks were already +{level}, nothing to change")
+                };
+                self.scripts.last = Some((text.clone(), true));
+                self.toast(text, ToastKind::Good);
+            }
+            Err(err) => {
+                self.scripts.last = Some((err.clone(), false));
+                self.toast(err, ToastKind::Bad);
+            }
+        }
+        self.repoll();
+        Ok(())
+    }
+
+    /// Set a fixed list of event flags through the game's own setter.
+    fn run_flag_list(
+        &mut self,
+        terminal: &mut Tui,
+        label: &str,
+        flags: &[u32],
+    ) -> std::io::Result<()> {
+        let total = flags.len();
+        if total == 0 {
+            self.toast(format!("{label}: nothing to set"), ToastKind::Warn);
+            return Ok(());
+        }
+        let mut set = 0usize;
+        let mut failed = 0usize;
+        let mut aborted = false;
+        let mut failure: Option<String> = None;
         for (i, flag) in flags.iter().enumerate() {
             let outcome = match self.game.as_ref() {
                 Some(game) => Some(game.set_event_flag(*flag, true)),
@@ -1158,14 +1328,11 @@ impl App {
             match outcome {
                 Some(Ok(())) => {
                     set += 1;
-                    std::thread::sleep(Duration::from_millis(4));
+                    std::thread::sleep(Duration::from_millis(8));
                 }
                 Some(Err(err)) => {
                     failed += 1;
-                    self.toast(
-                        format!("{label}: flag {flag} failed — {err}"),
-                        ToastKind::Bad,
-                    );
+                    failure = Some(format!("flag {flag}: {err}"));
                     break;
                 }
                 None => break,
@@ -1197,10 +1364,10 @@ impl App {
         }
         self.scripts.progress = None;
 
-        let mut text = format!("{label}: {set}/{total} flags set");
-        if failed > 0 {
-            text.push_str(&format!(", {failed} failed"));
-        }
+        let mut text = match &failure {
+            Some(reason) => format!("{label}: stopped after {set}/{total} — {reason}"),
+            None => format!("{label}: {set}/{total} flags set"),
+        };
         if aborted {
             text.push_str(" — stopped early");
         }
@@ -1208,6 +1375,108 @@ impl App {
         self.scripts.last = Some((text.clone(), ok));
         self.toast(text, if ok { ToastKind::Good } else { ToastKind::Warn });
         self.repoll();
+        Ok(())
+    }
+
+    /// Write the table's boss list one byte at a time: `0xFF` kills, `0x00`
+    /// revives. Memory writes only — no code runs in the game for this.
+    fn run_boss_flags(
+        &mut self,
+        terminal: &mut Tui,
+        label: &str,
+        dead: bool,
+    ) -> std::io::Result<()> {
+        let offsets = crate::scripts::boss_flag_offsets();
+        let total = offsets.len();
+        if total == 0 {
+            self.toast(format!("{label}: no boss flags"), ToastKind::Warn);
+            return Ok(());
+        }
+        let value = if dead { 0xFF } else { 0x00 };
+        let mut written = 0usize;
+        let mut failed = 0usize;
+        let mut aborted = false;
+        let mut failure: Option<String> = None;
+        for (i, offset) in offsets.iter().enumerate() {
+            let outcome = match self.game.as_ref() {
+                Some(game) => Some(game.set_flag_byte(*offset, value)),
+                None => None,
+            };
+            match outcome {
+                Some(Ok(())) => {
+                    written += 1;
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Some(Err(err)) => {
+                    failed += 1;
+                    failure = Some(format!("flag +{offset:#X}: {err}"));
+                    break;
+                }
+                None => break,
+            }
+            if i % 32 == 0 || i + 1 == total {
+                self.scripts.progress = Some(Progress {
+                    done: i + 1,
+                    total,
+                    name: format!("flag +{offset:#X}"),
+                });
+                terminal.draw(|frame| ui::draw(self, frame))?;
+                if event::poll(Duration::ZERO)? {
+                    if let Event::Key(key) = event::read()? {
+                        match key.code {
+                            KeyCode::Esc => {
+                                aborted = true;
+                                break;
+                            }
+                            KeyCode::Char('q') => {
+                                self.quit = true;
+                                aborted = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        self.scripts.progress = None;
+
+        let mut text = match &failure {
+            Some(reason) => format!("{label}: stopped after {written}/{total} — {reason}"),
+            None => format!("{label}: {written}/{total} bosses written"),
+        };
+        if aborted {
+            text.push_str(" — stopped early");
+        }
+        if failed == 0 && !aborted {
+            text.push_str(" — reload the area for it to show");
+        }
+        let ok = failed == 0 && !aborted;
+        self.scripts.last = Some((text.clone(), ok));
+        self.toast(text, if ok { ToastKind::Good } else { ToastKind::Warn });
+        self.repoll();
+        Ok(())
+    }
+
+    /// Torrent needs both halves: the flags that say the whistle is ours, and
+    /// the whistle item itself.
+    fn run_unlock_torrent(&mut self, terminal: &mut Tui, label: &str) -> std::io::Result<()> {
+        let flags = crate::scripts::TORRENT_FLAGS;
+        self.run_flag_list(terminal, label, &flags)?;
+        let (cat, id, qty, level) = crate::scripts::WHISTLE;
+        match self.game.as_ref().map(|game| game.give_item(cat, id, qty, level)) {
+            Some(Ok(_)) => {
+                let text = format!("{label}: flags set, {qty}× spectral steed whistle given");
+                self.scripts.last = Some((text.clone(), true));
+                self.toast(text, ToastKind::Good);
+                self.repoll();
+            }
+            Some(Err(err)) => self.toast(
+                format!("{label}: flags set but the whistle was refused — {err}"),
+                ToastKind::Warn,
+            ),
+            None => self.toast("attach to the game first (F5)", ToastKind::Warn),
+        }
         Ok(())
     }
 

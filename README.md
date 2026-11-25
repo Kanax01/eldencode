@@ -243,10 +243,54 @@ params when the expansion is actually loaded.
 | all consumables | 76 greases, pots, throwing items and food, 99 of each (119 with DLC) |
 | all reusable items | 19 reusables, one of each (27 with DLC) |
 | all upgrade materials | 39 smithing/somber stones and glovewort, 99 of each |
-| all maps, cookbooks & whetblades | 84 map fragments, cookbooks and whetblades (134 with DLC) |
+| all maps | 19 map fragments (24 with DLC) |
+| all cookbooks | 59 cookbooks (104 with DLC), plus the 58 recipe flags |
+| all whetblades | the 5 whetblades plus the whetstone knife |
+| all talisman pouches | 3 talisman pouches, the base game's set |
+| all memory stones | 8 memory stones, the base game's set |
+| all multiplayer items | fingers, effigies, ciphers, taunter's tongue and 99 remedies |
+| all wondrous physick items | the flask itself plus 18 crystal tears (19 with DLC) |
+| perfume bottles | the ten empty perfume bottles the perfume arts refill from |
+| max out flask number | tops the two flask allocations up to the 14-charge cap |
+| max out flask charge | takes both flasks to +12 through the game's own tool swap |
 | money bags | 99 of every rune item: golden, hero's, numen's, lord's |
-| unlock all graces | sets the event flag of every grace, base game + DLC |
-| activate all summoning pools | switches on every martyr effigy pool |
+| unlock torrent | flags Torrent as obtained and gives the spectral steed whistle |
+| unlock roundtable | sets Melina's invitation flags so Roundtable Hold is open |
+| reveal all maps | switches the map display on and reveals every map piece |
+| kill all bosses | marks all 164 boss entries dead — rewrites quest progress |
+| revive all bosses | marks them alive again, back in their arenas |
+| unlock all graces | sets every grace flag — 71xxx, 72xxx, 73xxx and 76xxx |
+| activate all summoning pools | switches on the whole 670xxx pool block |
+
+Two of these work differently from the item scripts. **Kill/revive bosses** copies
+the table's own "Revive/Kill ALL Bosses" entry: 164 byte offsets in
+`assets/boss_flags.tsv` are written through `[[EventFlagMan]+0x28]`, `0xFF` for
+dead and `0x00` for alive. One byte covers the group of flags a boss defeat
+touches, which is why the table writes a byte and not a bit — and why a revive
+is a byte write too. It is a memory write only, no code runs in the game, but it
+does rewrite quest progress, so back the save up first and reload the area for
+the change to show.
+
+**Torrent, Roundtable and maps** set named flags through the game's own setter.
+Torrent needs both halves — flag `60100` is the horse unlock (the game refuses to
+summon him without it even when the whistle is in the inventory), `4680` marks
+Melina's hand-off as done — plus the whistle item itself (goods `130`). The map
+display is a second layer on top of the fragment items: the switches `62000`
+(overworld), `62001` (underground) and `82001`/`82002`, and the piece flags
+`62004`–`62012` and `62020`–`62084`. Map fragments only set some of those, which
+is why giving the fragments alone can leave the map looking unchanged.
+
+`all crafting materials` gives the crafting kit first when the game's crafting
+flag (`60120`) is off, so the materials are actually usable. That flag is read
+straight out of the event flag block, which holds one byte per flag id — the same
+block the boss scripts write.
+
+The flask scripts work on `playerGameData` (`[GameDataMan]+8`): the charges are
+`EstusFlaskAllocateNum_byHp` and `_byMp` at `+0x101` / `+0x102`, and they add up
+to the number of flasks carried. Fourteen is the cap Golden Seeds reach, so the
+script only fills the difference (crimson first) and reports the split. Potency
+is the flask level, which the game keeps at +12 once every Sacred Tear is used;
+the upgrade script reports "nothing to change" when the flasks are already there.
 
 The id lists in `assets/scripts.tsv` are the table's own bulk dropdowns, with a
 per-row `dlc` flag so the base-game and DLC lists stay separate and duplicates
@@ -255,13 +299,32 @@ a base-game install fall over when they are added. Long runs mean thousands of p
 playable but expects a few seconds of hitching, and your inventory has finite
 room — anything over the cap is simply not added.
 
-The two flag scripts work differently: they walk a param list through the param
-repository (`[base+0x3C80158]` → list offset → `+0x80` → `+0x80`, rows from
-`+0x40` at a stride of `0x18`), then call the game's event-flag setter once per
-row with `rcx` = flag manager, `rdx` = pointer to the id, `r8b` = 1 — the same
-stub the table's unlock scripts use. Rows are validated before anything is
-written (sane count, plausible flag ids) and the run aborts on the first
-surprise.
+The two block scripts work differently: they write the flag block directly,
+one byte per id, the same write the table's boss entries use, so a whole block
+lands in about a tenth of a second with no calls into the game. **Graces** covers
+the four ranges the game gives them — `71000`–`71999` legacy dungeons,
+`72000`–`72999` the DLC, `73000`–`73999` caves and catacombs, `76000`–`76999` the
+open world. **Summoning pools** covers the `670000`–`670999` block every martyr
+effigy flag lives in. A flag no grace or pool uses is a spare byte and does
+nothing.
+
+The table reaches the same two lists through the param repository
+(`[base+0x3C80158]` → `+0xCA0`/`+0x30A0` → `+0x80` → `+0x80`, rows from `+0x40`
+at a stride of `0x18`, flag at `row+4` for graces and at the row id for pools).
+That base pointer is version specific: in this build `[base+0x3C80158]` lands in
+a string, so the ranges above are used instead. Reading the params is the better
+route when the pointer is valid — it only touches the flags that exist — but it
+is not worth guessing at an offset for.
+
+**Cookbooks** are the maps story again: the item does not unlock the recipes on
+its own, the flags in the 67xxx/68xxx block do. The script sets the table's own
+`Cookbook_Ids` list (58 unique flags after dropping its one typo `#27310`, which
+belongs to the Armorer's `67310` row, and one repeat) before handing over the
+books, so the recipes are cookable straight away.
+
+The single-flag scripts (Torrent, Roundtable, maps) call the game's own setter,
+found by the table's `EventFlag_C1` pattern rather than by the exported symbol,
+which takes different arguments and writes nothing.
 
 When FromSoftware ships a patch, base pointers move. The AOB scan then misses and
 the Overview/Process screens say which symbols failed instead of writing to a

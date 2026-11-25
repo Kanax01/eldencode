@@ -326,8 +326,35 @@ fn print_script(
             let gives = library.resolve(script, &catalog, include_dlc);
             let total = gives.len();
             println!("DLC items: {}", if include_dlc { "on" } else { "off" });
-            let take = limit.unwrap_or(usize::MAX);
-            println!("{total} items in the list, starting at {skip}, limit {take}");
+            // Cookbook items do not unlock their recipes by themselves.
+            let recipes = scripts::unlock_flags(script);
+            if !recipes.is_empty() {
+                run_flag_bytes(&game, "cookbook recipes", recipes, 0, None);
+            }
+            // The material list needs the crafting kit; the game marks the
+            // crafting feature with flag 60120, so that flag is the check.
+            if !scripts::prerequisites(script).is_empty() {
+                let owned = game
+                    .event_flag_byte(scripts::CRAFTING_KIT_FLAG)
+                    .unwrap_or(0)
+                    != 0;
+                if owned {
+                    println!("crafting kit: already owned");
+                } else {
+                    match game.give_item(items::Cat::Goods, scripts::CRAFTING_KIT, 1, 0) {
+                        Ok(_) => {
+                            let _ = game.set_event_flag(scripts::CRAFTING_KIT_FLAG, true);
+                            println!("crafting kit: given");
+                        }
+                        Err(err) => println!("crafting kit: refused — {err}"),
+                    }
+                }
+            }
+            let take = limit.unwrap_or(total);
+            match limit {
+                Some(_) => println!("{total} items in the list, starting at {skip}, limit {take}"),
+                None => println!("{total} items in the list, starting at {skip}, no limit"),
+            }
             let mut given = 0usize;
             let mut absent = 0usize;
             for (index, (cat, id, qty, level)) in gives.into_iter().enumerate().skip(skip) {
@@ -371,28 +398,71 @@ fn print_script(
                 println!("done: {given} given");
             }
         }
-        scripts::Kind::UnlockGraces => run_flags(&game, "graces", offsets::BONFIRE_LIST, true, skip, limit),
-        scripts::Kind::SummoningPools => {
-            run_flags(&game, "summoning pools", offsets::PUDDLE_LIST, false, skip, limit)
+        scripts::Kind::UnlockGraces => {
+            let flags = scripts::grace_flags();
+            run_flag_bytes(&game, "graces", &flags, skip, limit)
         }
+        scripts::Kind::SummoningPools => {
+            let flags = scripts::summoning_pool_flags();
+            run_flag_bytes(&game, "summoning pools", &flags, skip, limit)
+        }
+        scripts::Kind::Bosses { dead } => {
+            let label = if dead { "kill all bosses" } else { "revive all bosses" };
+            run_boss_flags(&game, label, dead, skip, limit)
+        }
+        scripts::Kind::UnlockTorrent => {
+            run_flag_list(&game, "torrent", &scripts::TORRENT_FLAGS, skip, limit);
+            let (cat, id, qty, level) = scripts::WHISTLE;
+            match game.give_item(cat, id, qty, level) {
+                Ok(returned) => println!("whistle: ok {returned:#X}"),
+                Err(err) => println!("whistle: FAILED: {err}"),
+            }
+        }
+        scripts::Kind::UnlockRoundtable => run_flag_list(
+            &game,
+            "roundtable",
+            &scripts::ROUNDTABLE_FLAGS,
+            skip,
+            limit,
+        ),
+        scripts::Kind::RevealMaps => {
+            let flags = scripts::map_reveal_flags();
+            run_flag_list(&game, "maps", &flags, skip, limit)
+        }
+        scripts::Kind::MaxFlaskNumber => match game.max_flask_charges() {
+            Ok((hp, mp)) => println!(
+                "flasks: {hp} crimson + {mp} cerulean = {} charges — rest at a grace to refresh",
+                u32::from(hp) + u32::from(mp)
+            ),
+            Err(err) => {
+                eprintln!("flasks: {err}");
+                std::process::exit(1);
+            }
+        },
+        scripts::Kind::MaxFlaskCharge => match game.max_flask_charge() {
+            Ok((level, swapped)) => {
+                if swapped {
+                    println!("flasks upgraded to +{level} — rest at a grace to save it");
+                } else {
+                    println!("flasks were already +{level}, nothing to change");
+                }
+            }
+            Err(err) => {
+                eprintln!("flasks: {err}");
+                std::process::exit(1);
+            }
+        },
     }
 }
 
-fn run_flags(
+/// Set a fixed list of event flags through the game's own setter.
+fn run_flag_list(
     game: &game::Game,
     label: &str,
-    list: u64,
-    flag_in_sub: bool,
+    flags: &[u32],
     skip: usize,
     limit: Option<usize>,
 ) {
-    let flags = match game.param_flag_ids(list, flag_in_sub) {
-        Ok(flags) => flags,
-        Err(err) => {
-            eprintln!("{label}: {err}");
-            std::process::exit(1);
-        }
-    };
     let take = limit.unwrap_or(usize::MAX);
     println!("{label}: {} flags, starting at {skip}, limit {take}", flags.len());
     let mut set = 0usize;
@@ -408,10 +478,67 @@ fn run_flags(
             Ok(()) => {
                 println!("ok");
                 set += 1;
-                std::thread::sleep(std::time::Duration::from_millis(4));
+                std::thread::sleep(std::time::Duration::from_millis(8));
             }
             Err(err) => {
                 println!("FAILED: {err}");
+                failed += 1;
+                break;
+            }
+        }
+    }
+    println!("done: {set} flags set, {failed} failed");
+}
+
+/// Write the table's boss list a byte at a time, like its kill/revive entries.
+fn run_boss_flags(game: &game::Game, label: &str, dead: bool, skip: usize, limit: Option<usize>) {
+    let offsets = scripts::boss_flag_offsets();
+    let value = if dead { 0xFF } else { 0x00 };
+    let take = limit.unwrap_or(usize::MAX);
+    println!("{label}: {} boss flags, value {value:#04X}", offsets.len());
+    let mut written = 0usize;
+    let mut failed = 0usize;
+    for (index, offset) in offsets.iter().enumerate().skip(skip) {
+        if written >= take {
+            break;
+        }
+        match game.set_flag_byte(*offset, value) {
+            Ok(()) => {
+                written += 1;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(err) => {
+                println!("  [{index}] +{offset:#X} FAILED: {err}");
+                failed += 1;
+                break;
+            }
+        }
+    }
+    println!("done: {written} written, {failed} failed — reload the area for it to show");
+}
+
+fn run_flag_bytes(
+    game: &game::Game,
+    label: &str,
+    flags: &[u32],
+    skip: usize,
+    limit: Option<usize>,
+) {
+    let take = limit.unwrap_or(usize::MAX);
+    println!(
+        "{label}: {} flags, starting at {skip}, limit {take}",
+        flags.len()
+    );
+    let mut set = 0usize;
+    let mut failed = 0usize;
+    for (index, flag) in flags.iter().enumerate().skip(skip) {
+        if set >= take {
+            break;
+        }
+        match game.set_flag_byte(u64::from(*flag), 1) {
+            Ok(()) => set += 1,
+            Err(err) => {
+                println!("  [{index}] flag {flag} FAILED: {err}");
                 failed += 1;
                 break;
             }

@@ -565,6 +565,30 @@ pub fn call(
     .map(|outcome| outcome.rax)
 }
 
+/// Shorthand for a call that only takes register arguments, the way the table's
+/// `executeCode`/`executeCodeEx` entries call the game's own routines: no buffer
+/// is written, the four arguments go straight into rcx/rdx/r8/r9.
+pub fn call_args(
+    mem: &Memory,
+    proc: &GameProcess,
+    target: u64,
+    args: [u64; 4],
+) -> Result<u64, String> {
+    let build = |_: u64| args;
+    run(
+        mem,
+        proc,
+        target,
+        &Spec {
+            buffer: None,
+            stack_args: &[],
+            capture: None,
+            args: &build,
+        },
+    )
+    .map(|outcome| outcome.rax)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

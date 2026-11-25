@@ -31,6 +31,13 @@ pub enum List {
     Reusables,
     Smithing,
     Maps,
+    Cookbooks,
+    Whetblades,
+    Pouches,
+    MemoryStones,
+    Multiplayer,
+    Physick,
+    Perfume,
 }
 
 impl List {
@@ -47,6 +54,13 @@ impl List {
             List::Reusables => "reusables",
             List::Smithing => "smithing",
             List::Maps => "maps",
+            List::Cookbooks => "cookbooks",
+            List::Whetblades => "whetblades",
+            List::Pouches => "pouches",
+            List::MemoryStones => "memory_stones",
+            List::Multiplayer => "multiplayer",
+            List::Physick => "physick",
+            List::Perfume => "perfume",
         }
     }
 }
@@ -79,6 +93,120 @@ pub enum Kind {
     UnlockGraces,
     /// Set every summoning-pool sign flag.
     SummoningPools,
+    /// The table's boss list, written a byte at a time: `0xFF` marks the boss
+    /// dead, `0x00` brings it back.
+    Bosses { dead: bool },
+    /// Torrent's unlock flags plus the whistle item itself.
+    UnlockTorrent,
+    /// Melina's invitation flags, which open Roundtable Hold.
+    UnlockRoundtable,
+    /// The map display switches plus every map piece flag.
+    RevealMaps,
+    /// Top both flasks up to fourteen charges.
+    MaxFlaskNumber,
+    /// Take both flasks to +12.
+    MaxFlaskCharge,
+}
+
+/// The crafting kit's item and the flag that marks the crafting feature as
+/// unlocked; the material list is useless without them.
+pub const CRAFTING_KIT: u32 = 8_500;
+pub const CRAFTING_KIT_FLAG: u32 = 60_120;
+
+const CRAFTING_KIT_NEEDED: [(Cat, u32); 1] = [(Cat::Goods, CRAFTING_KIT)];
+
+/// Items a script assumes you already own, given first when the inventory has
+/// none.
+pub fn prerequisites(script: &Script) -> &'static [(Cat, u32)] {
+    match script.kind {
+        Kind::Items {
+            source: Source::List(List::Crafting),
+            ..
+        } => &CRAFTING_KIT_NEEDED,
+        _ => &[],
+    }
+}
+
+/// Byte offsets into `[[EventFlagMan]+0x28]`, taken from the table's
+/// "Revive/Kill ALL Bosses" entry.
+pub const BOSS_FLAGS: &str = include_str!("../assets/boss_flags.tsv");
+
+pub fn boss_flag_offsets() -> Vec<u64> {
+    BOSS_FLAGS
+        .lines()
+        .filter_map(|line| u64::from_str_radix(line.trim(), 16).ok())
+        .collect()
+}
+
+/// Torrent: 60100 is the horse feature unlock — without it the game refuses to
+/// summon him even with the whistle in the inventory — 4680 marks Melina's
+/// hand-off as done, and the other two are the companion flags the whistle
+/// normally sets alongside it.
+pub const TORRENT_FLAGS: [u32; 4] = [60_100, 4_680, 4_681, 710_520];
+
+/// The item the whistle itself lives in: goods 130, "Spectral Steed Whistle".
+pub const WHISTLE: (Cat, u32, u32, u32) = (Cat::Goods, 130, 1, 0);
+
+/// Roundtable Hold: Melina's invitation gate — the accord, the whistle hand-off
+/// and the "rested at a grace outside Limgrave" step that makes her offer it.
+pub const ROUNDTABLE_FLAGS: [u32; 5] = [4_680, 4_681, 3_062, 3_063, 3_064];
+
+/// The flags that actually unlock the cooking recipes. Handing over the cookbook
+/// items is only half of it: the recipe list is flag driven, which is why the
+/// books appeared in the inventory and nothing could be cooked. Taken from the
+/// table's own `Cookbook_Ids` list (59 entries, one typo and one repeat
+/// removed).
+pub const COOKBOOK_FLAGS: [u32; 58] = [
+    67000, 67010, 67020, 67030, 67050, 67060, 67070, 67080, 67090, 67100,
+    67110, 67120, 67130, 67200, 67210, 67220, 67230, 67250, 67260, 67270,
+    67280, 67290, 67300, 67310, 67400, 67410, 67420, 67430, 67440, 67450,
+    67460, 67470, 67480, 67600, 67610, 67630, 67640, 67650, 67830, 67840,
+    67850, 67860, 67870, 67880, 67890, 67900, 67910, 67920, 68000, 68010,
+    68020, 68030, 68200, 68210, 68220, 68230, 68400, 68410,
+];
+
+/// Items that need flags set as well as the item itself.
+pub fn unlock_flags(script: &Script) -> &'static [u32] {
+    match script.kind {
+        Kind::Items {
+            source: Source::List(List::Cookbooks),
+            ..
+        } => &COOKBOOK_FLAGS,
+        _ => &[],
+    }
+}
+
+/// Grace flags. The table reads these out of `BonfireWarpParam`; the flag ids
+/// live in four ranges — 71xxx legacy dungeons, 72xxx the DLC, 73xxx caves and
+/// catacombs, 76xxx the open world — so the same set is written from the ranges.
+/// A flag that no grace uses is a spare byte and does nothing.
+pub fn grace_flags() -> Vec<u32> {
+    let mut flags = Vec::with_capacity(4_000);
+    for range in [
+        71_000..=71_999,
+        72_000..=72_999,
+        73_000..=73_999,
+        76_000..=76_999,
+    ] {
+        flags.extend(range);
+    }
+    flags
+}
+
+/// Summoning pools: every martyr effigy flag lives in the 670xxx block.
+pub fn summoning_pool_flags() -> Vec<u32> {
+    (670_000..=670_999).collect()
+}
+
+/// Map reveal, in two layers: first the display switches (overworld,
+/// underground, Shadow Realm), then every map piece flag — the same flags the
+/// map fragments set when the game hands them over, which is why the fragments
+/// alone can leave the map blank.
+pub fn map_reveal_flags() -> Vec<u32> {
+    let mut flags = vec![62_000, 62_001, 62_002, 82_001, 82_002];
+    flags.extend(62_004..=62_012);
+    flags.extend(62_020..=62_084);
+    flags
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +254,13 @@ impl Library {
                 "reusables" => "reusables",
                 "smithing" => "smithing",
                 "maps" => "maps",
+                "cookbooks" => "cookbooks",
+                "whetblades" => "whetblades",
+                "pouches" => "pouches",
+                "memory_stones" => "memory_stones",
+                "multiplayer" => "multiplayer",
+                "physick" => "physick",
+                "perfume" => "perfume",
                 "magic" => "magic",
                 _ => continue,
             };
@@ -254,7 +389,7 @@ fn split_variant(name: &str) -> (String, u32) {
     (trimmed.to_string(), 0)
 }
 
-pub const SCRIPTS: [Script; 17] = [
+pub const SCRIPTS: [Script; 31] = [
     Script {
         name: "all weapons & shields",
         blurb: "every weapon and shield, base game and DLC, at +0",
@@ -360,10 +495,50 @@ pub const SCRIPTS: [Script; 17] = [
         },
     },
     Script {
-        name: "all maps, cookbooks & whetblades",
-        blurb: "every map fragment, cookbook and whetblade, one of each",
+        name: "all maps",
+        blurb: "every map fragment, one of each",
         kind: Kind::Items {
             source: Source::List(List::Maps),
+            variant: Variant::Every,
+        },
+    },
+    Script {
+        name: "all cookbooks",
+        blurb: "every cookbook, one of each",
+        kind: Kind::Items {
+            source: Source::List(List::Cookbooks),
+            variant: Variant::Every,
+        },
+    },
+    Script {
+        name: "all whetblades",
+        blurb: "every whetblade plus the whetstone knife, one of each",
+        kind: Kind::Items {
+            source: Source::List(List::Whetblades),
+            variant: Variant::Every,
+        },
+    },
+    Script {
+        name: "all talisman pouches",
+        blurb: "three talisman pouches, the base game's set",
+        kind: Kind::Items {
+            source: Source::List(List::Pouches),
+            variant: Variant::Every,
+        },
+    },
+    Script {
+        name: "all multiplayer items",
+        blurb: "fingers, effigies, ciphers, taunter's tongue and 99 remedies",
+        kind: Kind::Items {
+            source: Source::List(List::Multiplayer),
+            variant: Variant::Every,
+        },
+    },
+    Script {
+        name: "all memory stones",
+        blurb: "eight memory stones, the base game's set",
+        kind: Kind::Items {
+            source: Source::List(List::MemoryStones),
             variant: Variant::Every,
         },
     },
@@ -374,6 +549,57 @@ pub const SCRIPTS: [Script; 17] = [
             source: Source::Runes,
             variant: Variant::Every,
         },
+    },
+    Script {
+        name: "all wondrous physick items",
+        blurb: "the flask itself plus every crystal tear, base game and DLC",
+        kind: Kind::Items {
+            source: Source::List(List::Physick),
+            variant: Variant::Every,
+        },
+    },
+    Script {
+        name: "unlock torrent",
+        blurb: "flags Torrent as obtained and gives the spectral steed whistle",
+        kind: Kind::UnlockTorrent,
+    },
+    Script {
+        name: "unlock roundtable",
+        blurb: "sets Melina's invitation flags so Roundtable Hold is open",
+        kind: Kind::UnlockRoundtable,
+    },
+    Script {
+        name: "reveal all maps",
+        blurb: "switches the map display on and reveals every map piece",
+        kind: Kind::RevealMaps,
+    },
+    Script {
+        name: "kill all bosses",
+        blurb: "marks every boss dead — this rewrites quest progress, back up first",
+        kind: Kind::Bosses { dead: true },
+    },
+    Script {
+        name: "revive all bosses",
+        blurb: "marks every boss alive again, back where it was fought",
+        kind: Kind::Bosses { dead: false },
+    },
+    Script {
+        name: "perfume bottles",
+        blurb: "the ten empty perfume bottles the arts are refilled from",
+        kind: Kind::Items {
+            source: Source::List(List::Perfume),
+            variant: Variant::Every,
+        },
+    },
+    Script {
+        name: "max out flask number",
+        blurb: "fourteen flask charges, split between crimson and cerulean",
+        kind: Kind::MaxFlaskNumber,
+    },
+    Script {
+        name: "max out flask charge",
+        blurb: "both flasks to +12, the highest Sacred Tears take them",
+        kind: Kind::MaxFlaskCharge,
     },
     Script {
         name: "unlock all graces",
