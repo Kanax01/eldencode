@@ -1,0 +1,20 @@
+[package]
+name = "eldencode"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "eldencode — a terminal mod menu for Elden Ring running under Proton"
+license = "MIT"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
