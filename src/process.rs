@@ -193,6 +193,32 @@ pub fn regions(pid: i32) -> Vec<(u64, u64)> {
     out
 }
 
+/// The game image's executable pages, i.e. where a `int3` gadget can live.
+pub fn image_exec_regions(proc: &GameProcess) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    if let Ok(maps) = fs::read_to_string(format!("/proc/{}/maps", proc.pid)) {
+        for line in maps.lines() {
+            let mut parts = line.splitn(3, ' ');
+            let Some(range) = parts.next() else { continue };
+            let Some(perms) = parts.next() else { continue };
+            if !perms.contains('x') {
+                continue;
+            }
+            let Some((start, end)) = range.split_once('-') else {
+                continue;
+            };
+            let (Ok(start), Ok(end)) = (
+                u64::from_str_radix(start, 16),
+                u64::from_str_radix(end, 16),
+            ) else {
+                continue;
+            };
+            out.push((start, end));
+        }
+    }
+    out
+}
+
 /// The game image's readable pages, i.e. where AOB scans run.
 pub fn image_regions(proc: &GameProcess) -> Vec<(u64, u64)> {
     let start = proc.base;

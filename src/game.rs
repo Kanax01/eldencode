@@ -114,6 +114,10 @@ impl Game {
             let hits = aob::find(&mem, &regions, &pattern, 1);
             match hits.first() {
                 Some(&hit) => {
+                    if def.direct {
+                        symbols.insert(def.name, hit);
+                        continue;
+                    }
                     let disp_addr = add_signed(hit, def.offset as i64).unwrap_or(hit);
                     match mem.read_i32(disp_addr) {
                         Ok(disp) => {
@@ -244,6 +248,48 @@ impl Game {
         let next = if current == 0 { 1 } else { 0 };
         self.set_number(field, next as u64)?;
         Ok(next)
+    }
+
+    /// Pointer the game's item routine expects in RCX, resolved the way the
+    /// table's stub does it.
+    pub fn inventory_manager(&self) -> Option<u64> {
+        let accessor = self.symbols.get("InventoryAccessor").copied()?;
+        let disp = self
+            .mem
+            .read_i32(accessor.checked_add(offsets::INVENTORY_DISP)?)
+            .ok()? as i64;
+        let slot = add_signed(accessor.checked_add(offsets::INVENTORY_SLOT)?, disp)?;
+        let manager = self.mem.read_u64(slot).ok()?;
+        if manager < 0x10000 {
+            None
+        } else {
+            Some(manager)
+        }
+    }
+
+    pub fn add_item_addr(&self) -> Option<u64> {
+        self.symbols.get("AddItemFunc").copied()
+    }
+
+    /// Add an item to the inventory by calling the game's own routine, exactly
+    /// like the cheat table's ItemGib: the id carries the category nibble and
+    /// the upgrade level, the quantity goes in its own field.
+    pub fn give_item(
+        &self,
+        cat: crate::items::Cat,
+        id: u32,
+        qty: u32,
+        level: u32,
+    ) -> Result<u64, String> {
+        let add_item = self.add_item_addr().ok_or_else(|| {
+            "AddItemFunc was not found — the game build does not match these offsets".to_string()
+        })?;
+        let inventory = self.inventory_manager().ok_or_else(|| {
+            "the inventory manager is null — load a character before giving items".to_string()
+        })?;
+        let buffer = crate::items::item_buffer(cat, id, qty, level);
+        let result = crate::spawn::call_add_item(&self.mem, &self.proc, add_item, inventory, &buffer)?;
+        Ok(result.returned)
     }
 
     /// `(symbol, resolved address)` for diagnostics; `None` means the AOB scan

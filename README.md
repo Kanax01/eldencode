@@ -2,8 +2,9 @@
 
 A terminal mod menu for **Elden Ring** on Linux, where the game runs through
 Steam/Proton. It gives you runes, edits attributes and vitals, flips the game's
-debug flags and slots weapons, armour and talismans straight into your
-character — all from a ratatui interface in your terminal.
+debug flags, adds any item to your inventory at the upgrade level you pick, and
+slots weapons, armour and talismans straight onto your character — all from a
+ratatui interface in your terminal.
 
 ```
  ELDENCODE   elden ring mod menu · Proton aware
@@ -14,7 +15,7 @@ character — all from a ratatui interface in your terminal.
 │ ● attached  eldenring.exe        ││ Name        Melina                   │
 │ Process id      48213            ││ Level       137   runes 4200318      │
 │ Image base      0x140000000      ││ HP       ████████████░░░░  1450/1780 │
-│ Symbols         6/6 resolved     ││ FP       ██████████████░░   220/240  │
+│ Symbols         8/8 resolved     ││ FP       ██████████████░░   220/240  │
 ╰──────────────────────────────────╯╰──────────────────────────────────────╯
 ```
 
@@ -27,7 +28,7 @@ character — all from a ratatui interface in your terminal.
 | **3 Attributes** | level, vigor, mind, endurance, strength, dexterity, intelligence, faith, arcane, scadutree blessing, revered spirit ash |
 | **4 Vitals** | live HP / FP / stamina and their caps |
 | **5 Flags** | the table's ChrDbg block: no dead, no damage, no FP consume, no stamina consume, no goods consume, no AI, plus per-character "disable gravity / map collision" |
-| **6 Items** | 6,523 weapons, armour pieces, talismans, items, ashes of war and spells with their ids, equipped into a ChrAsm slot of your choice |
+| **6 Items** | sub-tabs per item type over 6,523 ids (weapons, armour, talismans, items, ashes of war, spells); `enter` gives the item to your inventory at the chosen upgrade level and quantity, `e` equips it into a ChrAsm slot of your choice |
 | **7 Process** | every matching game process, its Proton prefix, the saves found there, diagnostics, save backup |
 | **8 Help** | the same information as text, including the permission fix |
 
@@ -76,19 +77,22 @@ Manual build: `cargo build --release && ./target/release/eldencode`.
 ## Keys
 
 ```
-1-8 / tab / shift-tab   switch screens          F5   attach or re-scan
-up/down, k/j            move                    enter  edit / toggle / equip
+1-8 / tab / shift-tab   switch screens          F5    attach or re-scan
+up/down, k/j            move                    enter give item (Items) / edit
 a, m        (Runes)     add 1M / set max         b     back up save
 /           (Items)     search                   x     clear search
-left/right  (Items)     category                 s/S   change equip slot
-t                       theme                    r     refresh values
-q / ctrl-c              quit
+left/right  (Items)     item type (sub-tabs)     s/S   change equip slot
+- and +     (Items)     upgrade level            ,/.   quantity
+e           (Items)     equip into the slot      t     theme
+r                       refresh values           q     quit (ctrl-c too)
 ```
 
 Diagnostics without the UI: `eldencode --scan` prints every process that matches
 `process` from the config, its image base and its Proton prefix, and
 `eldencode --probe` attaches, resolves each symbol, prints the live values and
-exits non-zero if a signature no longer matches.
+exits non-zero if a signature no longer matches. `eldencode --give <id>` adds one
+item from the command line — `--give 2010000 --level 5 --qty 2` is a Short Sword
++5, twice — which is also the quickest way to check the spawn path after a patch.
 
 ## How it works (Linux + Proton)
 
@@ -122,16 +126,41 @@ the ChrDbg flag bytes and the ChrAsm equipment slots.
 (weapon, armour, talisman, goods, ashes of war lists), so every id in the Items
 screen is an id that table would write.
 
+## Giving items
+
+The Items screen adds real inventory items. On Windows the table does this with a
+code cave and `CREATETHREAD`; Linux has no remote-thread call, so EldenCode
+borrows the game's own main thread with `ptrace` for a single call:
+
+1. The AOB scans from the table resolve `InventoryAccessor` and `AddItemFunc`,
+   and the inventory manager pointer is read the way the table's stub reads it
+   (`[InventoryAccessor+0x19]` indexes the pointer at `InventoryAccessor+0x1D`).
+2. The item struct is filled from the table's `itembuffer` template: id at
+   `+0x24`, quantity at `+0x28`, ash of war at `+0x30`. The id is
+   `(base | type << 28) + level`, using the table's `{0,1,2,4,8}` type table, so
+   `2010000` (Short Sword) at +5 is sent as `2010005`.
+3. The main thread is attached, its registers and SSE/AVX state are saved, `RIP`
+   is pointed at `AddItemFunc` with `rcx=manager, rdx=&buffer+0x20,
+   r8=&buffer, r9=0`, and the return address is a `0xCC` byte found in the
+   image, so the thread traps as soon as the routine returns.
+4. Registers, extended state and the borrowed stack bytes are restored and the
+   thread is released with signal 0. Nothing is written into executable memory
+   and no code is injected.
+
+Upgrade levels are capped per item: `+25` for smithing weapons, `+10` for somber
+ones, nothing for armour, talismans, items and spells.
+
 When FromSoftware ships a patch, base pointers move. The AOB scan then misses and
 the Overview/Process screens say which symbols failed instead of writing to a
 guess.
 
 ## What it deliberately does not do
 
-- **It cannot create a new inventory item.** That needs a call into the game's
-  own item-give routine, which the Cheat Engine table does with a code cave and
-  `CreateRemoteThread`-style injection. EldenCode writes equipment slots
-  directly instead, so a weapon is in your hand without being owned.
+- **No item removal or inventory editing.** Items are added through the game's
+  own routine; changing or deleting what you already own would need the
+  inventory struct's layout, which the table does not expose.
+- **No injected code.** Equipment slots are written directly as well, so `e`
+  puts a weapon in your hand even if you never gave it to yourself.
 - No teleport/warp, no param patching of weapon stats, no enemy editing. Those
   parts of the table need either injected code or per-patch param addresses.
 - No save editing: values live in memory and are written to the save by the game
@@ -155,7 +184,8 @@ src/process.rs        /proc discovery, image base, regions, Proton prefix, save 
 src/mem.rs            process_vm_readv/writev + /proc/<pid>/mem
 src/aob.rs            Cheat Engine style AOB pattern scanner
 src/offsets.rs        symbols, pointer chains, field tables
-src/game.rs           attach, chain resolution, read/write, snapshot, runes, equip
+src/game.rs           attach, chain resolution, read/write, snapshot, runes, equip, give_item
+src/spawn.rs          ptrace remote call into the game's item routine
 src/items.rs          item catalog
 src/app.rs            state, input, editing
 src/ui/               theme, widgets, screens

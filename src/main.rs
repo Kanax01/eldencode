@@ -5,6 +5,7 @@ mod game;
 mod items;
 mod mem;
 mod offsets;
+mod spawn;
 mod process;
 mod ui;
 
@@ -27,6 +28,9 @@ struct Cli {
     no_attach: bool,
     scan: bool,
     probe: bool,
+    give: Option<u32>,
+    qty: u32,
+    level: u32,
     help: bool,
     version: bool,
 }
@@ -65,6 +69,10 @@ fn main() {
     }
     if cli.probe {
         print_probe(&cfg);
+        return;
+    }
+    if let Some(id) = cli.give {
+        print_give(&cfg, id, cli.qty, cli.level);
         return;
     }
 
@@ -179,6 +187,15 @@ fn print_probe(cfg: &Config) {
             }
         }
     }
+    println!();
+    match game.inventory_manager() {
+        Some(addr) => println!("  inventory manager  {addr:#012X}"),
+        None => println!("  inventory manager  null — load a character first"),
+    }
+    match game.add_item_addr() {
+        Some(addr) => println!("  add item routine   {addr:#012X}"),
+        None => println!("  add item routine   MISSING"),
+    }
     match write_error {
         Some(err) => println!("\nwrite check FAILED: {err}"),
         None => println!("\nwrite check: rewrote {written} field(s) with their current value"),
@@ -186,6 +203,57 @@ fn print_probe(cfg: &Config) {
     if missing > 0 {
         println!("{missing} symbol(s) missing — offsets do not match this game build");
         std::process::exit(1);
+    }
+}
+
+/// `--give`: add an item to the inventory from the command line, the same path
+/// the Items screen uses.
+fn print_give(cfg: &Config, id: u32, qty: u32, level: u32) {
+    let catalog = items::Catalog::load();
+    let found = catalog
+        .items
+        .iter()
+        .find(|item| item.id == id)
+        .or_else(|| {
+            catalog
+                .items
+                .iter()
+                .find(|item| item.id == items::base_id(id))
+        })
+        .map(|item| (item.cat, item.id, item.name.to_string()));
+    let Some((cat, base, name)) = found else {
+        eprintln!("eldencode: item id {id} is not in assets/items.tsv");
+        std::process::exit(2);
+    };
+    let level = level.min(catalog.max_level(base));
+    let gib = items::gib_id(cat, base, level);
+    let suffix = if level > 0 {
+        format!(" +{level}")
+    } else {
+        String::new()
+    };
+    println!("giving {qty}× {name}{suffix}  id {gib:#010X}");
+
+    let Some(proc) = process::scan(&cfg.process).into_iter().next() else {
+        eprintln!("no process matches '{}'", cfg.process);
+        std::process::exit(1);
+    };
+    let game = match game::Game::attach(proc) {
+        Ok(game) => game,
+        Err(err) => {
+            eprintln!("attach failed: {}", err.message);
+            if let Some(hint) = err.hint {
+                eprintln!("hint: {hint}");
+            }
+            std::process::exit(1);
+        }
+    };
+    match game.give_item(cat, base, qty, level) {
+        Ok(returned) => println!("the item routine returned {returned:#X}"),
+        Err(err) => {
+            eprintln!("give failed: {err}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -225,6 +293,9 @@ fn parse_cli() -> Result<Cli, String> {
         no_attach: false,
         scan: false,
         probe: false,
+        give: None,
+        qty: 1,
+        level: 0,
         help: false,
         version: false,
     };
@@ -238,6 +309,26 @@ fn parse_cli() -> Result<Cli, String> {
             "--no-attach" => cli.no_attach = true,
             "--scan" => cli.scan = true,
             "--probe" => cli.probe = true,
+            "--give" => {
+                let raw = args.next().ok_or("--give needs an item id")?;
+                cli.give = Some(
+                    raw.parse()
+                        .map_err(|_| format!("'--give {raw}' is not a numeric item id"))?,
+                );
+            }
+            "--qty" => {
+                let raw = args.next().ok_or("--qty needs a number")?;
+                cli.qty = raw
+                    .parse::<u32>()
+                    .map_err(|_| format!("'--qty {raw}' is not a number"))?
+                    .clamp(1, 999);
+            }
+            "--level" => {
+                let raw = args.next().ok_or("--level needs a number")?;
+                cli.level = raw
+                    .parse::<u32>()
+                    .map_err(|_| format!("'--level {raw}' is not a number"))?;
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option '{other}'"));
             }
@@ -260,6 +351,9 @@ OPTIONS:
     --no-anim      lower UI refresh rate for this session
     --scan         print detected game processes and their Proton prefix, then exit
     --probe        attach, resolve every symbol and print the live values, then exit
+    --give <ID>    add item ID to the inventory, then exit (needs the game running)
+    --qty <N>      how many to add with --give (1-999, default 1)
+    --level <N>    upgrade level for --give (capped at +25 / +10 per weapon)
     -h, --help     print this help
     -V, --version  print the version
 
@@ -269,7 +363,10 @@ OVERVIEW:
     resolves the same AOB-scanned base pointers the Hexinton 8.0.4 Cheat Engine
     table uses, and writes the character record through process_vm_writev.
     Runes, attributes, HP/FP/SP, the ChrDbg flags and equipment slots are
-    editable. No kernel module, no Cheat Engine, nothing installed into the game.
+    editable, and items can be added to the inventory: the Items screen calls the
+    game's own item routine the way the table's ItemGib does, borrowing the main
+    thread with ptrace for a single call and restoring it immediately. No kernel
+    module, no Cheat Engine, nothing installed into the game.
 
 REQUIREMENTS:
     - Elden Ring started with EasyAntiCheat disabled (offline)
@@ -284,6 +381,9 @@ KEYS:
     a / m           add 1M / max runes    b        back up save
     t               theme                 r        refresh values
     q / ctrl-c      quit                  /        search items
+    - and +         upgrade level         , and .  quantity
+    enter           give item             e        equip into the current slot
+    left/right      switch item type      s / S    cycle equipment slot
 
 Files live in ~/.eldencode: config.toml and backups/.
 

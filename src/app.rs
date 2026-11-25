@@ -108,6 +108,9 @@ pub struct ItemsView {
     pub sel: usize,
     pub scroll: usize,
     pub slot: usize,
+    /// Upgrade level added to the item id when giving a weapon.
+    pub level: u32,
+    pub qty: u32,
     pub filtered: Vec<usize>,
 }
 
@@ -193,6 +196,8 @@ impl App {
                 sel: 0,
                 scroll: 0,
                 slot: 0,
+                level: 0,
+                qty: 1,
                 filtered: Vec::new(),
             },
             toast: None,
@@ -317,6 +322,22 @@ impl App {
         if self.items.sel >= self.items.filtered.len() {
             self.items.sel = self.items.filtered.len().saturating_sub(1);
         }
+        let max = self.selected_max_level();
+        if self.items.level > max {
+            self.items.level = max;
+        }
+    }
+
+    pub fn selected_item(&self) -> Option<&crate::items::Item> {
+        let idx = *self.items.filtered.get(self.items.sel)?;
+        self.catalog.items.get(idx)
+    }
+
+    /// Highest upgrade level for the highlighted item.
+    pub fn selected_max_level(&self) -> u32 {
+        self.selected_item()
+            .map(|item| self.catalog.max_level(item.id))
+            .unwrap_or(0)
     }
 
     // --------------------------------------------------------------- attach
@@ -699,8 +720,59 @@ impl App {
                 self.items.slot =
                     (self.items.slot + offsets::EQUIP.len() - 1) % offsets::EQUIP.len();
             }
-            KeyCode::Enter => self.equip_selected(),
+            KeyCode::Char('-') => {
+                self.items.level = self.items.level.saturating_sub(1);
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                let max = self.selected_max_level();
+                if self.items.level < max {
+                    self.items.level += 1;
+                } else if max == 0 {
+                    self.toast("this item type has no upgrade level", ToastKind::Info);
+                } else {
+                    self.toast(format!("max upgrade level is +{max}"), ToastKind::Info);
+                }
+            }
+            KeyCode::Char(',') => {
+                self.items.qty = self.items.qty.saturating_sub(1).max(1);
+            }
+            KeyCode::Char('.') => {
+                self.items.qty = (self.items.qty + 1).min(999);
+            }
+            KeyCode::Enter => self.give_selected(),
+            KeyCode::Char('e') => self.equip_selected(),
             _ => {}
+        }
+    }
+
+    /// Give the highlighted item to the inventory, with the chosen level and
+    /// quantity, through the game's own item routine.
+    fn give_selected(&mut self) {
+        let Some(item) = self.selected_item().cloned() else {
+            return;
+        };
+        let (id, name, cat) = (item.id, item.name.to_string(), item.cat);
+        let level = self.items.level.min(self.catalog.max_level(id));
+        let qty = self.items.qty;
+        let gib = crate::items::gib_id(cat, id, level);
+        let Some(game) = &self.game else {
+            self.toast("attach to the game first (F5)", ToastKind::Warn);
+            return;
+        };
+        match game.give_item(cat, id, qty, level) {
+            Ok(_) => {
+                let suffix = if level > 0 {
+                    format!(" +{level}")
+                } else {
+                    String::new()
+                };
+                self.toast(
+                    format!("gave {qty}× {name}{suffix}  ({gib:#010X})"),
+                    ToastKind::Good,
+                );
+                self.repoll();
+            }
+            Err(err) => self.toast(err, ToastKind::Bad),
         }
     }
 

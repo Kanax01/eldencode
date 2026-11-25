@@ -33,6 +33,54 @@ impl Cat {
             Cat::Magic => "Magic",
         }
     }
+
+    /// Category nibble (bits 28..31) the game's item routine expects. Values
+    /// come from the table's `ConvertTypeIndexTable` / itemgib2 lists.
+    pub fn type_nibble(self) -> u32 {
+        match self {
+            Cat::Weapon => 0x0000_0000,
+            Cat::Armor => 0x1000_0000,
+            Cat::Talisman => 0x2000_0000,
+            Cat::Goods | Cat::Magic => 0x4000_0000,
+            Cat::Ash => 0x8000_0000,
+        }
+    }
+}
+
+/// Weapon/ash ids carry their upgrade level in the last two digits.
+pub fn base_id(id: u32) -> u32 {
+    id - id % 100
+}
+
+/// The exact id the game's item routine is called with:
+/// `(base | category << 28) + level`, the same arithmetic the table's Lua does.
+pub fn gib_id(cat: Cat, id: u32, level: u32) -> u32 {
+    (base_id(id) | cat.type_nibble()).wrapping_add(level)
+}
+
+/// The 0x50-byte item struct from the table's `itembuffer` template: id at
+/// +0x24, quantity at +0x28, ash of war at +0x30 (0xFFFFFFFF = none).
+pub fn item_buffer(cat: Cat, id: u32, qty: u32, level: u32) -> [u8; 0x50] {
+    const TEMPLATE: [u64; 10] = [
+        0,
+        0,
+        0,
+        0,
+        0xF000_06AE_0000_0001,
+        0x0000_0000_0000_0001,
+        0xFFFF_FFFF_FFFF_FFFF,
+        0xFFFF_FFFF_0000_0000,
+        0xFFFF_FFFF_FFFF_FFFF,
+        0xFFFF_FFFF_0000_0000,
+    ];
+    let mut buffer = [0u8; 0x50];
+    for (i, word) in TEMPLATE.iter().enumerate() {
+        buffer[i * 8..i * 8 + 8].copy_from_slice(&word.to_le_bytes());
+    }
+    buffer[0x24..0x28].copy_from_slice(&gib_id(cat, id, level).to_le_bytes());
+    buffer[0x28..0x2C].copy_from_slice(&qty.clamp(1, 999).to_le_bytes());
+    buffer[0x30..0x34].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    buffer
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +143,39 @@ impl Catalog {
     }
 
     /// Ids in one category, optionally narrowed by a case-insensitive substring.
+    pub fn count(&self, cat: Cat) -> usize {
+        self.items.iter().filter(|item| item.cat == cat).count()
+    }
+
+    /// Highest upgrade level for this id.
+    ///
+    /// Standard weapons share a 10,000-wide id block with their 13 affinity
+    /// variants and reach +25; unique (somber) weapons stand alone in their
+    /// block and stop at +10. Everything that is not a weapon has no level.
+    pub fn max_level(&self, id: u32) -> u32 {
+        let base = base_id(id);
+        let is_weapon = self
+            .items
+            .iter()
+            .any(|item| item.cat == Cat::Weapon && (item.id == id || item.id == base));
+        if !is_weapon {
+            return 0;
+        }
+        let block = base - base % 10_000;
+        let family = self
+            .items
+            .iter()
+            .filter(|item| {
+                item.cat == Cat::Weapon && item.id >= block && item.id < block + 10_000
+            })
+            .count();
+        if family > 1 {
+            25
+        } else {
+            10
+        }
+    }
+
     pub fn filter(&self, cat: Cat, query: &str) -> Vec<usize> {
         let needle = query.trim().to_ascii_lowercase();
         self.items

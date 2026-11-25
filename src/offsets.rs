@@ -20,6 +20,9 @@ pub struct SymbolDef {
     /// Bytes from the displacement to the end of the instruction (+4) plus any
     /// extra the table adds.
     pub additional: i64,
+    /// True when the symbol *is* the matched address (a function entry or a
+    /// code position), not a rip-relative global.
+    pub direct: bool,
 }
 
 /// `48 8B 05/0D/3D` style: displacement starts at byte 3 of the match.
@@ -29,6 +32,7 @@ const fn sym(name: &'static str, pattern: &'static str, additional: i64) -> Symb
         pattern,
         offset: 3,
         additional,
+        direct: false,
     }
 }
 
@@ -39,6 +43,18 @@ const fn sym_cmp(name: &'static str, pattern: &'static str, additional: i64) -> 
         pattern,
         offset: 2,
         additional,
+        direct: false,
+    }
+}
+
+/// `aobscanmodule` result used as-is: a function entry or code position.
+const fn code(name: &'static str, pattern: &'static str) -> SymbolDef {
+    SymbolDef {
+        name,
+        pattern,
+        offset: 0,
+        additional: 0,
+        direct: true,
     }
 }
 
@@ -75,7 +91,22 @@ pub const SYMBOLS: &[SymbolDef] = &[
         "48 8B 05 ?? ?? ?? ?? 41 83 FF 02 ?? ?? 48 85 C0",
         7,
     ),
+    // Item spawning, straight from the table's InventoryAccessor / AddItemFunc
+    // scans. Both are code positions, so they are used without a fixup.
+    code(
+        "InventoryAccessor",
+        "44 8B 61 1C 41 8B FC C1 EF 07 40 80 E7 01 41 C1 EC 08 41 80 E4 01 48 8B 0D",
+    ),
+    code(
+        "AddItemFunc",
+        "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 70 FF FF FF 48 81 EC 90 01 00 00 48 C7 45 C8 FE FF FF FF 48 89 9C 24 D8 01 00 00 48 8B 05",
+    ),
 ];
+
+/// From the table's itemgib stub: `mov rax, InventoryAccessor+19; mov eax,[rax];
+/// cdqe; mov rcx, InventoryAccessor+1D; add rcx, rax; mov rcx,[rcx]`.
+pub const INVENTORY_DISP: u64 = 0x19;
+pub const INVENTORY_SLOT: u64 = 0x1D;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {

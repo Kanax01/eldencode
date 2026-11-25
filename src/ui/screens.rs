@@ -1,5 +1,5 @@
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -329,55 +329,77 @@ pub fn runes(app: &App, f: &mut Frame, area: Rect) {
 
 pub fn items(app: &App, f: &mut Frame, area: Rect) {
     let theme = app.theme;
-    let cat = Cat::ALL[app.items.cat.min(Cat::ALL.len() - 1)];
     let block = panel("items", &theme);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if inner.height < 3 || inner.width < 20 {
+    if inner.height < 4 || inner.width < 24 {
         return;
     }
-    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(2)]).split(inner);
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(2),
+    ])
+    .split(inner);
+
+    // Sub-tabs, one per item type; left/right switches them.
+    let mut tabs: Vec<Span> = vec![Span::raw(" ")];
+    for (i, kind) in Cat::ALL.iter().enumerate() {
+        let active = i == app.items.cat;
+        let label = format!(" {} {} ", kind.label(), app.catalog.count(*kind));
+        if active {
+            tabs.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme.grad(0.35))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            tabs.push(Span::styled(label, Style::default().fg(theme.muted)));
+        }
+        tabs.push(Span::raw(" "));
+    }
+    f.render_widget(Paragraph::new(Line::from(tabs)), rows[0]);
 
     let slot = app.current_slot();
-    let mut header_lines = vec![
-        Line::from(vec![
-            Span::raw("  "),
-            accent(format!("< {} >", cat.label()), &theme),
-            dim(
-                format!(
-                    "   {} items   ·   slot: {} → {}",
-                    app.items.filtered.len(),
-                    slot.label,
-                    app.slot_value()
-                ),
-                &theme,
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("  "),
-            dim("search: ", &theme),
-            if matches!(&app.edit, Some(e) if e.kind == EditKind::Search) {
-                let buf = app.edit.as_ref().map(|e| e.buf.clone()).unwrap_or_default();
-                let cursor = app.edit.as_ref().map(|e| e.cursor).unwrap_or(buf.len());
-                Span::styled(
-                    widgets::cursor_at(&buf, cursor),
-                    Style::default().fg(theme.accent2),
-                )
-            } else if app.items.query.is_empty() {
-                dim("(/ to filter, x to clear)", &theme)
-            } else {
-                Span::styled(app.items.query.clone(), Style::default().fg(theme.accent2))
-            },
-            dim("      s / S change equip slot", &theme),
-        ]),
-    ];
-    header_lines.truncate(2);
-    f.render_widget(
-        Paragraph::new(header_lines).style(Style::default().fg(theme.text)),
-        rows[0],
-    );
+    let max_level = app.selected_max_level();
+    let level = app.items.level.min(max_level);
+    let level_text = if max_level == 0 {
+        "—".to_string()
+    } else {
+        format!("+{level} / +{max_level}")
+    };
+    let search = if matches!(&app.edit, Some(e) if e.kind == EditKind::Search) {
+        let buf = app.edit.as_ref().map(|e| e.buf.clone()).unwrap_or_default();
+        let cursor = app.edit.as_ref().map(|e| e.cursor).unwrap_or(buf.len());
+        Span::styled(
+            widgets::cursor_at(&buf, cursor),
+            Style::default().fg(theme.accent2),
+        )
+    } else if app.items.query.is_empty() {
+        dim("(/ to filter)", &theme)
+    } else {
+        Span::styled(app.items.query.clone(), Style::default().fg(theme.accent2))
+    };
+    let controls = Line::from(vec![
+        Span::raw("  "),
+        dim("level ", &theme),
+        Span::styled(level_text, Style::default().fg(theme.accent2)),
+        dim("   qty ", &theme),
+        Span::styled(
+            app.items.qty.to_string(),
+            Style::default().fg(theme.accent2),
+        ),
+        dim("   equip ", &theme),
+        Span::styled(slot.label.to_string(), Style::default().fg(theme.accent)),
+        dim(format!(" → {}", app.slot_value()), &theme),
+        dim("   ", &theme),
+        search,
+    ]);
+    f.render_widget(Paragraph::new(controls), rows[1]);
 
-    let height = rows[1].height as usize;
+    let height = rows[2].height as usize;
     let sel = app
         .items
         .sel
@@ -409,16 +431,24 @@ pub fn items(app: &App, f: &mut Frame, area: Rect) {
         } else {
             Style::default().fg(theme.text)
         };
+        let mut name = item.name.to_string();
+        let cap = app.catalog.max_level(item.id);
+        if cap > 0 {
+            let level = app.items.level.min(cap);
+            if level > 0 {
+                name.push_str(&format!(" +{level}"));
+            }
+        }
         lines.push(Line::from(vec![
             Span::styled(marker.to_string(), Style::default().fg(theme.accent)),
             Span::styled(format!("{:>9}", item.id), Style::default().fg(theme.muted)),
             Span::raw("  "),
-            Span::styled(item.name.to_string(), name_style),
+            Span::styled(name, name_style),
         ]));
     }
     f.render_widget(
         Paragraph::new(lines).style(Style::default().fg(theme.text).bg(theme.panel)),
-        rows[1],
+        rows[2],
     );
 }
 
@@ -612,7 +642,7 @@ fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
         "5 Flags         the table's ChrDbg flags (no damage, no FP, ...)",
     ));
     out.push(body(
-        "6 Items         equip any weapon/armour/talisman id into a ChrAsm slot",
+        "6 Items         give any item (with level and quantity) or equip it directly",
     ));
     out.push(body(
         "7 Process       detected processes, prefix, backup, diagnostics",
@@ -636,21 +666,38 @@ fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
         "q / ctrl-c             quit                /  search items",
     ));
     out.push(Line::from(""));
+    out.push(title("Giving items"));
+    out.push(body(
+        "enter in the Items screen calls the game's own item routine — the same one",
+    ));
+    out.push(body(
+        "the table reaches through ItemGib. The id carries the category nibble and",
+    ));
+    out.push(body(
+        "the upgrade level picked with -/+, the quantity comes from ,/. . Linux has",
+    ));
+    out.push(body(
+        "no CreateRemoteThread, so eldencode borrows the game's main thread with",
+    ));
+    out.push(body(
+        "ptrace for that single call, restores its registers, then continues. The",
+    ));
+    out.push(body(
+        "item lands in your inventory; e instead equips it into a ChrAsm slot.",
+    ));
+    out.push(Line::from(""));
     out.push(title("Limits, honestly"));
     out.push(body(
-        "EldenCode cannot spawn a new item into the inventory: that needs a call into",
+        "Offsets follow game 1.17.1 — after a patch the AOB scan can miss and the",
     ));
     out.push(body(
-        "the game's own ItemGib routine, which Cheat Engine does with a code cave.",
+        "header says which symbols failed. Upgrade levels are capped at what the",
     ));
     out.push(body(
-        "Equipment slots are written directly instead, so a weapon is in your hand",
+        "catalog knows (+25 smithing weapons, +10 somber); weapon ids already carry",
     ));
     out.push(body(
-        "without owning it. Offsets are tied to game 1.17.1; after a patch the AOB",
-    ));
-    out.push(body(
-        "scan may miss and the header will say which symbols failed.",
+        "their level in the last two digits, so +N is added the way the table does.",
     ));
     out
 }
