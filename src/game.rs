@@ -60,7 +60,29 @@ pub struct Game {
     pub failed_symbols: Vec<&'static str>,
     pub scanned_mb: f64,
     pub regions: usize,
+    /// Item param tables discovered in the game's memory.
+    param_tables: std::sync::OnceLock<Vec<Option<ParamTable>>>,
 }
+
+/// One of the game's param tables (`EquipParamWeapon` and friends): a header
+/// with the row count, then a sorted index of `{ id, data offset, checksum }`
+/// entries of 0x18 bytes at `+0x40`. Row ids are 64-bit and every table ends
+/// with a `PARAM_SENTINEL` row.
+#[derive(Clone, Copy)]
+pub struct ParamTable {
+    pub head: u64,
+    pub rows: u32,
+}
+
+/// The row id every param table ends with.
+const PARAM_SENTINEL: u64 = 99_999_999;
+/// How much of the game's memory is read at a time while looking for params.
+const SCAN_CHUNK: usize = 8 << 20;
+/// Params live in the big writable mappings; smaller ones are not worth a scan.
+const SCAN_MIN_REGION: u64 = 64 << 20;
+/// How far around a found table the other param tables are looked for.
+const SCAN_WINDOW_BACK: u64 = 384 << 20;
+const SCAN_WINDOW_FORWARD: u64 = 64 << 20;
 
 fn add_signed(base: u64, offset: i64) -> Option<u64> {
     if offset >= 0 {
@@ -140,6 +162,7 @@ impl Game {
             failed_symbols: failed,
             scanned_mb: total as f64 / (1024.0 * 1024.0),
             regions: regions.len(),
+            param_tables: std::sync::OnceLock::new(),
         })
     }
 
@@ -267,8 +290,302 @@ impl Game {
         }
     }
 
+    /// Is a character actually loaded?
+    ///
+    /// The item routine walks the local player on its way to the inventory, so
+    /// calling it from the title screen or a loading screen faults inside the
+    /// game. The vitals chain is the same one the table uses for HP: it is null
+    /// until you are in the world.
+    pub fn in_game(&self) -> bool {
+        match offsets::VITALS.first() {
+            Some(field) => self.resolve(field).is_ok(),
+            None => false,
+        }
+    }
+
     pub fn add_item_addr(&self) -> Option<u64> {
         self.symbols.get("AddItemFunc").copied()
+    }
+
+    fn param_row_id(&self, table: ParamTable, index: u32) -> Option<u64> {
+        self.mem
+            .read_u64(table.head + 0x40 + u64::from(index) * 0x18)
+            .ok()
+    }
+
+    /// Is `id` one of this table's rows? The index is sorted, so search it.
+    pub fn table_has(&self, table: ParamTable, id: u64) -> bool {
+        let (mut low, mut high) = (0u32, table.rows);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            match self.param_row_id(table, mid) {
+                Some(value) if value == id => return true,
+                Some(value) if value < id => low = mid + 1,
+                Some(_) => high = mid,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// Walk back from a row to the table that owns it: the rows above it must
+    /// ascend into the header, and the header's row count must be the number of
+    /// rows walked. Everything else in memory is rejected by that.
+    fn table_at_row(&self, row: u64) -> Option<ParamTable> {
+        let mut start = row;
+        let mut steps = 0u64;
+        loop {
+            if steps > 200_000 {
+                return None;
+            }
+            let previous = self.mem.read_u64(start.checked_sub(0x18)?).ok()?;
+            let current = self.mem.read_u64(start).ok()?;
+            if previous == 0 || previous >= current || previous > 0x2000_0000 {
+                break;
+            }
+            start -= 0x18;
+            steps += 1;
+        }
+        let head = start.checked_sub(0x40)?;
+        let packed = self.mem.read_u32(head + 8).ok()?;
+        if packed & 0xFFFF > 0xF0 {
+            return None;
+        }
+        let rows = (packed >> 16) & 0xFFFF;
+        if rows == 0 || u64::from(rows) != (row - start) / 0x18 + 1 {
+            return None;
+        }
+        Some(ParamTable { head, rows })
+    }
+
+    /// The same search, from the end of the range backwards: the game's params
+    /// are allocated late, at the top of the arena.
+    fn scan_params_back(
+        &self,
+        lo: u64,
+        hi: u64,
+        targets: &[(usize, u64)],
+        probes: &[Vec<u32>],
+        out: &mut [Option<ParamTable>],
+        buffer: &mut [u8],
+    ) -> bool {
+        let mut end = hi;
+        while end > lo {
+            let len = SCAN_CHUNK.min((end - lo) as usize);
+            let start = end - len as u64;
+            let chunk = &mut buffer[..len];
+            if self.mem.read(start, chunk).is_err() {
+                end = start;
+                continue;
+            }
+            for (offset, word) in chunk.chunks_exact(8).enumerate() {
+                let value = u64::from_le_bytes(word.try_into().unwrap_or([0; 8]));
+                if value >> 32 != 0 {
+                    continue;
+                }
+                let small = value as u32;
+                for (index, anchor) in targets.iter() {
+                    if *anchor as u32 != small || out[*index].is_some() {
+                        continue;
+                    }
+                    let Some(table) = self.table_at_row(start + offset as u64 * 8) else {
+                        continue;
+                    };
+                    let hits = probes[*index]
+                        .iter()
+                        .filter(|id| self.table_has(table, u64::from(**id)))
+                        .count();
+                    let need = if *anchor == PARAM_SENTINEL {
+                        1
+                    } else {
+                        probes[*index].len() / 2 + 1
+                    };
+                    if hits >= need {
+                        out[*index] = Some(table);
+                    }
+                }
+                if targets.iter().all(|(index, _)| out[*index].is_some()) {
+                    return true;
+                }
+            }
+            end = start;
+        }
+        targets.iter().all(|(index, _)| out[*index].is_some())
+    }
+
+    /// A table addressed by its header: the only reliable way in, because it
+    /// checks the row count against the whole index.
+    fn table_at_head(&self, head: u64) -> Option<ParamTable> {
+        let packed = self.mem.read_u32(head + 8).ok()?;
+        if packed & 0xFFFF > 0xF0 {
+            return None;
+        }
+        let rows = (packed >> 16) & 0xFFFF;
+        if rows < 8 || rows > 0x8000 {
+            return None;
+        }
+        let mut start = head + 0x40 + u64::from(rows - 1) * 0x18;
+        let mut steps = 0u64;
+        while steps + 1 < u64::from(rows) {
+            let previous = self.mem.read_u64(start - 0x18).ok()?;
+            let current = self.mem.read_u64(start).ok()?;
+            if previous == 0 || previous >= current || previous > 0x2000_0000 {
+                break;
+            }
+            start -= 0x18;
+            steps += 1;
+        }
+        if steps + 1 != u64::from(rows) {
+            return None;
+        }
+        Some(ParamTable { head, rows })
+    }
+
+    /// Every param header carries this at `+4`; find them all in one range and
+    /// keep the ones that are a whole category's table.
+    fn scan_param_headers(
+        &self,
+        lo: u64,
+        hi: u64,
+        probes: &[Vec<u32>],
+        out: &mut [Option<ParamTable>],
+        buffer: &mut [u8],
+    ) {
+        let mut at = lo;
+        while at < hi {
+            let len = SCAN_CHUNK.min((hi - at) as usize);
+            if len < 8 {
+                break;
+            }
+            let chunk = &mut buffer[..len];
+            if self.mem.read(at, chunk).is_err() {
+                at += len as u64;
+                continue;
+            }
+            for (word, bytes) in chunk.chunks_exact(4).enumerate() {
+                if u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4])) != 0x0001_0000 {
+                    continue;
+                }
+                let Some(head) = (at + word as u64 * 4).checked_sub(4) else {
+                    continue;
+                };
+                if head < lo {
+                    continue;
+                }
+                let Some(table) = self.table_at_head(head) else {
+                    continue;
+                };
+                for (index, ids) in probes.iter().enumerate() {
+                    if out[index].is_some() || ids.len() < 2 {
+                        continue;
+                    }
+                    let hits = ids
+                        .iter()
+                        .filter(|id| self.table_has(table, u64::from(**id)))
+                        .count();
+                    if hits >= ids.len() / 2 + 1 {
+                        out[index] = Some(table);
+                    }
+                }
+            }
+            at += len as u64;
+        }
+    }
+
+    /// Find each category's param table by scanning the game's memory for an id
+    /// the table must contain — for weapons the sentinel row every table ends
+    /// with — then checking that the table really holds that category's ids.
+    ///
+    /// Weapons are looked for first and everything else is searched only around
+    /// the table found that way, because the game keeps its params together:
+    /// scanning every large mapping would take half a minute.
+    fn discover_params(&self) -> Vec<Option<ParamTable>> {
+        let cats = crate::items::Cat::ALL;
+        let mut out: Vec<Option<ParamTable>> = vec![None; cats.len()];
+        let probes: Vec<Vec<u32>> = cats.iter().map(|cat| crate::items::probe_ids(*cat)).collect();
+        // Every probe id is an anchor: one of them is always a row, and a hit
+        // is only accepted when the table holds the category's other ids too.
+        let mut anchors: Vec<(usize, u64)> = Vec::new();
+        for (index, ids) in probes.iter().enumerate() {
+            // A weapon table ends with the sentinel row, which finds all three
+            // copies of it at once; the other tables are found by their own ids
+            // and confirmed by holding a second one.
+            if cats[index] == crate::items::Cat::Weapon {
+                anchors.push((index, PARAM_SENTINEL));
+            }
+            for id in [ids.first(), ids.get(ids.len() / 2), ids.last()]
+                .into_iter()
+                .flatten()
+            {
+                let entry = (index, u64::from(*id));
+                if !anchors.contains(&entry) {
+                    anchors.push(entry);
+                }
+            }
+        }
+        let weapons: Vec<(usize, u64)> = anchors
+            .iter()
+            .copied()
+            .filter(|(index, _)| cats[*index] == crate::items::Cat::Weapon)
+            .collect();
+        let first = if weapons.is_empty() {
+            anchors.clone()
+        } else {
+            weapons
+        };
+        let mut regions = process::regions(self.proc.pid);
+        regions.sort_by_key(|(lo, hi)| std::cmp::Reverse(hi - lo));
+        let mut buffer = vec![0u8; SCAN_CHUNK];
+        let mut home = None;
+        for (lo, hi) in regions {
+            if hi - lo < SCAN_MIN_REGION {
+                break;
+            }
+            self.scan_params_back(lo, hi, &first, &probes, &mut out, &mut buffer);
+            if out.iter().any(|table| table.is_some()) {
+                home = Some((lo, hi));
+                break;
+            }
+        }
+        if let (Some((lo, hi)), Some(center)) = (home, out.iter().flatten().next().copied()) {
+            let from = center.head.saturating_sub(SCAN_WINDOW_BACK).max(lo);
+            let to = center.head.saturating_add(SCAN_WINDOW_FORWARD).min(hi);
+            self.scan_param_headers(from, to, &probes, &mut out, &mut buffer);
+        }
+        out
+    }
+
+    /// The param table holding a category's items, discovered once per session.
+    pub fn item_param(&self, cat: crate::items::Cat) -> Option<ParamTable> {
+        let tables = self.param_tables.get_or_init(|| self.discover_params());
+        let index = crate::items::Cat::ALL
+            .iter()
+            .position(|candidate| *candidate == cat)?;
+        tables.get(index).copied().flatten()
+    }
+
+    /// Does the game have an item param for this id?
+    ///
+    /// `None` means it could not be checked, which must not block a give;
+    /// `Some(false)` means the id does not exist, and sending it is what makes
+    /// the game fall over, so it is refused.
+    pub fn has_item(&self, cat: crate::items::Cat, id: u32) -> Option<bool> {
+        // Callers pass an item id; the id the routine is called with carries the
+        // category nibble (`0x20000000 | 1000` for a talisman), and the table
+        // stores the bare row. Strip it before comparing, or every category but
+        // weapons is refused even though its row exists.
+        let id = id & 0x0FFF_FFFF;
+        let table = self.item_param(cat)?;
+        if self.table_has(table, u64::from(id)) {
+            return Some(true);
+        }
+        if cat != crate::items::Cat::Weapon {
+            return Some(false);
+        }
+        // A weapon's upgrade level rides on top of the row id: a Dagger +5 is
+        // row 1000000 sent as 1000005.
+        let base = id - id % 100;
+        Some(base != id && self.table_has(table, u64::from(base)))
     }
 
     /// Add an item to the inventory by calling the game's own routine, exactly
@@ -287,10 +604,32 @@ impl Game {
         let inventory = self.inventory_manager().ok_or_else(|| {
             "the inventory manager is null — load a character before giving items".to_string()
         })?;
+        if !self.in_game() {
+            return Err(
+                "no character is loaded — stand in the world before giving items".to_string(),
+            );
+        }
+        // Never send an id the game has no param row for: that is what crashes.
+        let plain = crate::items::plain_id(cat, id, level);
+        if self.has_item(cat, plain) == Some(false) {
+            return Err(format!(
+                "the game has no item param for {plain:#X} — refusing to send it"
+            ));
+        }
         let buffer = crate::items::item_buffer(cat, id, qty, level);
-        crate::spawn::call(&self.mem, &self.proc, add_item, &buffer, &|at| {
+        crate::spawn::log(&format!(
+            "give {cat:?} id {id:#X} level {level} qty {qty} as {:#X} (row {plain:#X}), \
+             inventory {inventory:#X}, routine {add_item:#X}",
+            u32::from_le_bytes(buffer[0x24..0x28].try_into().unwrap_or([0; 4]))
+        ));
+        let result = crate::spawn::call(&self.mem, &self.proc, add_item, &buffer, &|at| {
             [inventory, at + 0x20, at, 0]
-        })
+        });
+        crate::spawn::log(&match &result {
+            Ok(handle) => format!("give id {id:#X}: routine returned {handle:#X}"),
+            Err(err) => format!("give id {id:#X}: {err}"),
+        });
+        result
     }
 
     pub fn event_flag_setter(&self) -> Option<u64> {

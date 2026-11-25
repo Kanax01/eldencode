@@ -137,13 +137,14 @@ pub fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("←→", "type"),
             ("-/+", "level"),
             (",/.", "qty"),
-            ("enter", "give"),
+            ("enter", "upgrade / give"),
             ("e", "equip"),
             ("/", "search"),
         ],
         Tab::Scripts => vec![
             ("↑↓", "choose"),
             ("enter", "run"),
+            ("d", "dlc items"),
             ("esc", "cancel"),
         ],
         Tab::Process => vec![

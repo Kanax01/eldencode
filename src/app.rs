@@ -106,6 +106,24 @@ pub struct Edit {
     pub cursor: usize,
 }
 
+/// The upgrade sheet: pick a level for a weapon, then give it.
+pub struct GiveMenu {
+    /// Weapon family id, without the level.
+    pub family: u32,
+    pub name: String,
+    pub level: u32,
+    pub max_level: u32,
+    pub qty: u32,
+    pub cat: Cat,
+}
+
+impl GiveMenu {
+    /// The id the game wants, before the level is added.
+    pub fn id(&self) -> u32 {
+        self.family
+    }
+}
+
 pub struct ItemsView {
     pub cat: usize,
     pub query: String,
@@ -120,6 +138,9 @@ pub struct ItemsView {
 
 pub struct ScriptsView {
     pub sel: usize,
+    /// Include the DLC-only item lists in scripts. Off by default: DLC ids are
+    /// not in the base game's item params.
+    pub include_dlc: bool,
     /// Script waiting for a second enter press.
     pub pending: Option<usize>,
     pub progress: Option<Progress>,
@@ -133,6 +154,8 @@ pub struct Progress {
 }
 
 pub struct App {
+    /// Open the weapon upgrade menu, if any.
+    pub give_menu: Option<GiveMenu>,
     pub paths: Paths,
     pub cfg: Config,
     pub theme: ui::Theme,
@@ -201,7 +224,7 @@ impl App {
         let script_lib = Library::load();
         let script_counts: Vec<usize> = SCRIPTS
             .iter()
-            .map(|script| script_lib.resolve(script, &catalog).len())
+            .map(|script| script_lib.resolve(script, &catalog, false).len())
             .collect();
         let mut app = App {
             paths,
@@ -227,8 +250,10 @@ impl App {
                 qty: 1,
                 filtered: Vec::new(),
             },
+            give_menu: None,
             scripts: ScriptsView {
                 sel: 0,
+                include_dlc: false,
                 pending: None,
                 progress: None,
                 last: None,
@@ -498,6 +523,10 @@ impl App {
             self.edit_key(key);
             return;
         }
+        if self.give_menu.is_some() {
+            self.give_menu_key(key);
+            return;
+        }
         if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
             self.quit = true;
             return;
@@ -733,12 +762,14 @@ impl App {
                 self.items.cat = (self.items.cat + Cat::ALL.len() - 1) % Cat::ALL.len();
                 self.items.sel = 0;
                 self.items.scroll = 0;
+                self.clamp_qty();
                 self.refresh_items();
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 self.items.cat = (self.items.cat + 1) % Cat::ALL.len();
                 self.items.sel = 0;
                 self.items.scroll = 0;
+                self.clamp_qty();
                 self.refresh_items();
             }
             KeyCode::Char('/') => {
@@ -777,12 +808,25 @@ impl App {
                 self.items.qty = self.items.qty.saturating_sub(1).max(1);
             }
             KeyCode::Char('.') => {
-                self.items.qty = (self.items.qty + 1).min(999);
+                let cap = crate::items::max_stack(Cat::ALL[self.items.cat]);
+                self.items.qty = (self.items.qty + 1).min(cap);
             }
-            KeyCode::Enter => self.give_selected(),
+            KeyCode::Enter => {
+                if self.selected_item().map(|item| item.cat) == Some(Cat::Weapon) {
+                    self.open_give_menu();
+                } else {
+                    self.give_selected();
+                }
+            }
             KeyCode::Char('e') => self.equip_selected(),
             _ => {}
         }
+    }
+
+    /// Keep the chosen quantity inside the limit of the category on screen.
+    fn clamp_qty(&mut self) {
+        let cap = crate::items::max_stack(Cat::ALL[self.items.cat]);
+        self.items.qty = self.items.qty.clamp(1, cap);
     }
 
     /// Give the highlighted item to the inventory, with the chosen level and
@@ -794,6 +838,88 @@ impl App {
         let (id, name, cat) = (item.id, item.name.to_string(), item.cat);
         let level = self.items.level.min(self.catalog.max_level(id));
         let qty = self.items.qty;
+        let gib = crate::items::gib_id(cat, id, level);
+        let Some(game) = &self.game else {
+            self.toast("attach to the game first (F5)", ToastKind::Warn);
+            return;
+        };
+        match game.give_item(cat, id, qty, level) {
+            Ok(_) => {
+                let suffix = if level > 0 {
+                    format!(" +{level}")
+                } else {
+                    String::new()
+                };
+                self.toast(
+                    format!("gave {qty}× {name}{suffix}  ({gib:#010X})"),
+                    ToastKind::Good,
+                );
+                self.repoll();
+            }
+            Err(err) => self.toast(err, ToastKind::Bad),
+        }
+    }
+
+    /// Enter on a weapon: pick the upgrade level first. The level is the last
+    /// two digits of the id the game uses, so it is arithmetic on the family id.
+    fn open_give_menu(&mut self) {
+        let Some(item) = self.selected_item().cloned() else {
+            return;
+        };
+        let family = item.id - item.id % 10_000;
+        let max_level = self.catalog.max_level(family);
+        self.give_menu = Some(GiveMenu {
+            family,
+            name: self
+                .catalog
+                .name_of(family, Cat::Weapon)
+                .unwrap_or_else(|| item.name.to_string()),
+            level: self.items.level.min(max_level),
+            max_level,
+            qty: self.items.qty,
+            cat: item.cat,
+        });
+    }
+
+    fn give_menu_key(&mut self, key: KeyEvent) {
+        if self.give_menu.is_none() {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.give_menu = None;
+                return;
+            }
+            KeyCode::Enter => {
+                if let Some(menu) = self.give_menu.take() {
+                    self.give_with(menu.cat, menu.id(), menu.qty, menu.level);
+                }
+                return;
+            }
+            _ => {}
+        }
+        let Some(menu) = self.give_menu.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('-') => {
+                menu.level = menu.level.saturating_sub(1);
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') | KeyCode::Char('=') => {
+                if menu.level < menu.max_level {
+                    menu.level += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Give one item, reporting the id the game actually received.
+    fn give_with(&mut self, cat: Cat, id: u32, qty: u32, level: u32) {
+        let name = self
+            .catalog
+            .name_of(id, cat)
+            .unwrap_or_else(|| format!("id {id}"));
         let gib = crate::items::gib_id(cat, id, level);
         let Some(game) = &self.game else {
             self.toast("attach to the game first (F5)", ToastKind::Warn);
@@ -838,6 +964,16 @@ impl App {
                 self.scripts.pending = None;
             }
             KeyCode::Esc => self.scripts.pending = None,
+            KeyCode::Char('d') => {
+                self.scripts.include_dlc = !self.scripts.include_dlc;
+                self.refresh_script_counts();
+                let text = if self.scripts.include_dlc {
+                    "DLC items on — scripts use the DLC lists too"
+                } else {
+                    "DLC items off — base game lists only"
+                };
+                self.toast(text, ToastKind::Info);
+            }
             KeyCode::Enter => {
                 if self.scripts.pending == Some(self.scripts.sel) {
                     self.scripts.pending = None;
@@ -863,8 +999,15 @@ impl App {
         }
         match script.kind {
             ScriptKind::Items { .. } => {
-                let gives = self.script_lib.resolve(script, &self.catalog);
-                self.run_gives(terminal, script.name, gives)
+                let gives = self
+                    .script_lib
+                    .resolve(script, &self.catalog, self.scripts.include_dlc);
+                let label = if self.scripts.include_dlc {
+                    format!("{} (with DLC)", script.name)
+                } else {
+                    script.name.to_string()
+                };
+                self.run_gives(terminal, &label, gives)
             }
             ScriptKind::UnlockGraces => {
                 self.run_flags(terminal, script.name, offsets::BONFIRE_LIST, true)
@@ -873,6 +1016,18 @@ impl App {
                 self.run_flags(terminal, script.name, offsets::PUDDLE_LIST, false)
             }
         }
+    }
+
+    fn refresh_script_counts(&mut self) {
+        let include_dlc = self.scripts.include_dlc;
+        self.script_counts = SCRIPTS
+            .iter()
+            .map(|script| {
+                self.script_lib
+                    .resolve(script, &self.catalog, include_dlc)
+                    .len()
+            })
+            .collect();
     }
 
     fn run_gives(
@@ -888,23 +1043,47 @@ impl App {
         }
 
         let mut given = 0usize;
+        let mut skipped = 0usize;
         let mut failed = 0usize;
         let mut aborted = false;
+        let mut failure: Option<String> = None;
         for (i, (cat, id, qty, level)) in gives.iter().enumerate() {
+            let name = self
+                .catalog
+                .name_of(*id, *cat)
+                .unwrap_or_else(|| format!("id {id}"));
             let outcome = match self.game.as_ref() {
                 Some(game) => Some(game.give_item(*cat, *id, *qty, *level)),
                 None => None,
             };
             match outcome {
-                Some(Ok(_)) => given += 1,
-                Some(Err(_)) => failed += 1,
+                Some(Ok(returned)) => {
+                    if returned == 0 {
+                        skipped += 1;
+                    } else {
+                        given += 1;
+                    }
+                    // The game rebuilds its inventory on the main thread after
+                    // each item, so leave room between calls and a longer beat
+                    // every so often rather than hammering a whole list.
+                    std::thread::sleep(Duration::from_millis(25));
+                    if given % 20 == 0 {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+                // The game has no row for this id, so nothing was sent: count
+                // it and keep going instead of abandoning the whole list.
+                Some(Err(err)) if err.contains("no item param") => {
+                    skipped += 1;
+                }
+                Some(Err(err)) => {
+                    failed += 1;
+                    failure = Some(format!("{name} ({id}): {err}"));
+                    break;
+                }
                 None => break,
             }
             if i % 6 == 0 || i + 1 == total {
-                let name = self
-                    .catalog
-                    .name_of(*id, *cat)
-                    .unwrap_or_else(|| format!("id {id}"));
                 self.scripts.progress = Some(Progress {
                     done: i + 1,
                     total,
@@ -931,9 +1110,12 @@ impl App {
         }
         self.scripts.progress = None;
 
-        let mut text = format!("{label}: {given}/{total} given");
-        if failed > 0 {
-            text.push_str(&format!(", {failed} failed"));
+        let mut text = match &failure {
+            Some(reason) => format!("{label}: stopped after {given}/{total} — {reason}"),
+            None => format!("{label}: {given}/{total} given"),
+        };
+        if skipped > 0 {
+            text.push_str(&format!(" ({skipped} already owned or refused)"));
         }
         if aborted {
             text.push_str(" — stopped early");
@@ -974,8 +1156,18 @@ impl App {
                 None => None,
             };
             match outcome {
-                Some(Ok(())) => set += 1,
-                Some(Err(_)) => failed += 1,
+                Some(Ok(())) => {
+                    set += 1;
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+                Some(Err(err)) => {
+                    failed += 1;
+                    self.toast(
+                        format!("{label}: flag {flag} failed — {err}"),
+                        ToastKind::Bad,
+                    );
+                    break;
+                }
                 None => break,
             }
             if i % 4 == 0 || i + 1 == total {

@@ -160,10 +160,65 @@ pub fn scan(needle: &str) -> Vec<GameProcess> {
             image,
         });
     }
-    // Prefer a match with a real image mapping; a straggler process may have
-    // already unmapped the executable.
-    out.sort_by_key(|p| (p.base == 0, p.pid));
+    // A process without an image mapping is a zombie or a launcher stub: its
+    // /proc/<pid>/mem is unreadable, so never offer it as the game.
+    out.retain(|p| p.base != 0);
+    out.sort_by_key(|p| p.pid);
     out
+}
+
+/// Base address of a module, taken from the mapping that starts at file
+#[allow(dead_code)]
+/// offset 0 — the same base the loader used.
+pub fn module_base(pid: i32, name: &str) -> Option<u64> {
+    let needle = name.to_ascii_lowercase();
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
+    for line in maps.lines() {
+        let mut parts = line.splitn(6, ' ');
+        let range = parts.next()?;
+        parts.next()?;
+        let offset = parts.next()?;
+        parts.next()?;
+        parts.next()?;
+        let path = parts.next().unwrap_or("").trim();
+        if path.is_empty() || offset != "00000000" {
+            continue;
+        }
+        let lower = path.to_ascii_lowercase();
+        let base_name = lower.rsplit('/').next().unwrap_or(&lower);
+        if base_name != needle && !lower.ends_with(&needle) {
+            continue;
+        }
+        let (start, _) = range.split_once('-')?;
+        return u64::from_str_radix(start, 16).ok();
+    }
+    None
+}
+
+/// Is this address inside a mapping the process may execute?
+#[allow(dead_code)]
+pub fn is_executable(pid: i32, addr: u64) -> bool {
+    let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) else {
+        return false;
+    };
+    for line in maps.lines() {
+        let mut parts = line.splitn(6, ' ');
+        let Some(range) = parts.next() else { continue };
+        let Some(perms) = parts.next() else { continue };
+        let Some((start, end)) = range.split_once('-') else {
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (
+            u64::from_str_radix(start, 16),
+            u64::from_str_radix(end, 16),
+        ) else {
+            continue;
+        };
+        if addr >= start && addr < end {
+            return perms.contains('x');
+        }
+    }
+    false
 }
 
 /// Readable, non-special mappings of a process.

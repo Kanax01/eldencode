@@ -9,7 +9,7 @@
 //! table's `SetEventFlag` stub does it: `rcx` = event flag manager, `rdx` =
 //! pointer to the flag id, `r8b` = 1.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::items::{Cat, Catalog};
 
@@ -92,6 +92,8 @@ pub struct Entry {
     pub cat: Cat,
     pub id: u32,
     pub qty: u32,
+    /// Comes from one of the DLC-only lists.
+    pub dlc: bool,
 }
 
 pub struct Library {
@@ -111,6 +113,7 @@ impl Library {
             ) else {
                 continue;
             };
+            let dlc = parts.next().map(|flag| flag.trim() == "1").unwrap_or(false);
             let key = match key {
                 "weapons" => "weapons",
                 "weapons_max" => "weapons_max",
@@ -138,7 +141,10 @@ impl Library {
                 "magic" => Cat::Magic,
                 _ => Cat::Goods,
             };
-            lists.entry(key).or_default().push(Entry { cat, id, qty });
+            lists
+                .entry(key)
+                .or_default()
+                .push(Entry { cat, id, qty, dlc });
         }
         Library { lists }
     }
@@ -147,15 +153,20 @@ impl Library {
         self.lists.get(key).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub fn resolve(&self, script: &Script, catalog: &Catalog) -> Vec<Give> {
+    /// Items for a script. `include_dlc` decides whether the DLC-only lists are
+    /// part of it — they are off by default because DLC ids are not in the item
+    /// params of the base game.
+    pub fn resolve(&self, script: &Script, catalog: &Catalog, include_dlc: bool) -> Vec<Give> {
         let Kind::Items { source, variant } = script.kind else {
             return Vec::new();
         };
-        match source {
+        let wanted = |entry: &&Entry| include_dlc || !entry.dlc;
+        let mut out = match source {
             Source::List(list) => {
                 let mut out: Vec<Give> = self
                     .list(list.key())
                     .iter()
+                    .filter(wanted)
                     .map(|entry| {
                         // Weapon ids carry the upgrade level in the last two
                         // digits, so the pre-maxed list needs no extra work.
@@ -175,12 +186,14 @@ impl Library {
             Source::Sorceries => self
                 .list("magic")
                 .iter()
+                .filter(wanted)
                 .filter(|entry| entry.id < 6000)
                 .map(|entry| (Cat::Magic, entry.id, entry.qty.max(1), 0))
                 .collect(),
             Source::Incantations => self
                 .list("magic")
                 .iter()
+                .filter(wanted)
                 .filter(|entry| entry.id >= 6000)
                 .map(|entry| (Cat::Magic, entry.id, entry.qty.max(1), 0))
                 .collect(),
@@ -190,8 +203,20 @@ impl Library {
                 .filter(|item| item.cat == Cat::Goods && is_rune(item.name))
                 .map(|item| (Cat::Goods, item.id, 99, 0))
                 .collect(),
-        }
+        };
+        // One call per item. Two rows can name the same item (a variant listed
+        // twice, or two spellings of one id), and a bulk script must not add it
+        // twice; the id the game is called with is what decides.
+        let mut seen: HashSet<u32> = HashSet::new();
+        out.retain(|give| seen.insert(item_id(give)));
+        out
     }
+}
+
+/// The id the game's item routine is called with, so duplicates collapse.
+fn item_id(give: &Give) -> u32 {
+    let (cat, id, _qty, level) = *give;
+    crate::items::gib_id(cat, id, level)
 }
 
 fn is_rune(name: &str) -> bool {
@@ -296,7 +321,7 @@ pub const SCRIPTS: [Script; 17] = [
     },
     Script {
         name: "all crafting materials",
-        blurb: "every crafting material, 500 of each",
+        blurb: "every crafting material, 99 of each",
         kind: Kind::Items {
             source: Source::List(List::Crafting),
             variant: Variant::Every,
@@ -304,7 +329,7 @@ pub const SCRIPTS: [Script; 17] = [
     },
     Script {
         name: "all arrows & bolts",
-        blurb: "every arrow and bolt, 500 of each",
+        blurb: "every arrow and bolt, 99 of each",
         kind: Kind::Items {
             source: Source::List(List::Arrows),
             variant: Variant::Every,
@@ -312,7 +337,7 @@ pub const SCRIPTS: [Script; 17] = [
     },
     Script {
         name: "all consumables",
-        blurb: "greases, pots, throwing items, food and draughts — 500 of each",
+        blurb: "greases, pots, throwing items, food and draughts — 99 of each",
         kind: Kind::Items {
             source: Source::List(List::Consumables),
             variant: Variant::Every,
@@ -328,7 +353,7 @@ pub const SCRIPTS: [Script; 17] = [
     },
     Script {
         name: "all upgrade materials",
-        blurb: "smithing stones, somber stones and glovewort, 999 of each",
+        blurb: "smithing stones, somber stones and glovewort, 99 of each",
         kind: Kind::Items {
             source: Source::List(List::Smithing),
             variant: Variant::Every,
@@ -361,3 +386,29 @@ pub const SCRIPTS: [Script; 17] = [
         kind: Kind::SummoningPools,
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bulk give must never hand the game the same item twice.
+    #[test]
+    fn every_script_gives_each_item_once() {
+        let library = Library::load();
+        let catalog = Catalog::load();
+        for script in SCRIPTS.iter() {
+            for dlc in [false, true] {
+                let gives = library.resolve(script, &catalog, dlc);
+                let mut seen: HashSet<u32> = HashSet::new();
+                for give in &gives {
+                    assert!(
+                        seen.insert(item_id(give)),
+                        "{} repeats {:?} (dlc {dlc})",
+                        script.name,
+                        give
+                    );
+                }
+            }
+        }
+    }
+}

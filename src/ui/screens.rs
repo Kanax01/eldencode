@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{screen_fields, App, EditKind};
@@ -327,6 +327,96 @@ pub fn runes(app: &App, f: &mut Frame, area: Rect) {
     widgets::lines_in(f, rows[1], panel("quick", &theme), lines, &theme, 0);
 }
 
+/// The upgrade sheet: enter on a weapon picks a level first.
+pub fn give_menu(app: &App, f: &mut Frame, area: Rect) {
+    let Some(menu) = &app.give_menu else {
+        return;
+    };
+    let theme = app.theme;
+    let width = 48.min(area.width.saturating_sub(2));
+    let height = 11.min(area.height.saturating_sub(2));
+    if width < 34 || height < 9 {
+        return;
+    }
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    f.render_widget(Clear, popup);
+    let block = panel(&format!("upgrade {}", menu.name.to_lowercase()), &theme);
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let row = |name: &str, value: String, extra: String, active: bool| -> Line<'static> {
+        let mut spans = vec![
+            if active {
+                accent(" › ", &theme)
+            } else {
+                dim("   ", &theme)
+            },
+            if active {
+                Span::styled(
+                    format!("{name:<9}"),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                dim(format!("{name:<9}"), &theme)
+            },
+            Span::raw(value),
+        ];
+        if !extra.is_empty() {
+            spans.push(dim(format!("  {extra}"), &theme));
+        }
+        Line::from(spans)
+    };
+
+    let level = if menu.max_level == 0 {
+        "fixed".to_string()
+    } else {
+        format!("+{}", menu.level)
+    };
+    let level_note = if menu.max_level == 0 {
+        String::new()
+    } else {
+        format!("max +{}", menu.max_level)
+    };
+    let gib = crate::items::gib_id(menu.cat, menu.id(), menu.level);
+    let variant = app
+        .catalog
+        .name_of(menu.id(), menu.cat)
+        .unwrap_or_else(|| menu.name.clone());
+
+    let lines = vec![
+        Line::from(""),
+        row("level", format!("‹ {level} ›"), level_note, true),
+        row(
+            "amount",
+            format!("×{}", menu.qty),
+            "from the items screen".into(),
+            false,
+        ),
+        Line::from(""),
+        Line::from(vec![
+            dim("   gives ", &theme),
+            good(format!("{variant} {level}"), &theme),
+            dim(format!("  · {gib:#010X}"), &theme),
+        ]),
+        Line::from(""),
+        Line::from(vec![dim(
+            "   ←→ level · enter give · esc cancel",
+            &theme,
+        )]),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
+    );
+}
+
 pub fn items(app: &App, f: &mut Frame, area: Rect) {
     let theme = app.theme;
     let block = panel("items", &theme);
@@ -450,6 +540,7 @@ pub fn items(app: &App, f: &mut Frame, area: Rect) {
         Paragraph::new(lines).style(Style::default().fg(theme.text).bg(theme.panel)),
         rows[2],
     );
+    give_menu(app, f, area);
 }
 
 pub fn process(app: &App, f: &mut Frame, area: Rect) {
@@ -553,15 +644,27 @@ pub fn scripts(app: &App, f: &mut Frame, area: Rect) {
     }
     let rows = Layout::vertical([Constraint::Min(3), Constraint::Length(4)]).split(inner);
 
+    let dlc = if app.scripts.include_dlc {
+        Span::styled(
+            " dlc items on ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme.warn)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        dim(" dlc items off (d) ", &theme)
+    };
     let mut lines: Vec<Line<'static>> = vec![Line::from(vec![
         Span::raw("  "),
         dim(
             format!(
-                "{} bulk actions · each gives one item through the game's own routine",
+                "{} bulk actions · one item per call ·",
                 crate::scripts::SCRIPTS.len()
             ),
             &theme,
         ),
+        dlc,
     ])];
     for (i, script) in crate::scripts::SCRIPTS.iter().enumerate() {
         let picked = i == app.scripts.sel;
@@ -784,7 +887,12 @@ fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
     out.push(body(
         "summoning pools. enter twice starts, esc stops, q quits. Long runs take a few",
     ));
-    out.push(body("seconds because each item is one call into the game."));
+    out.push(body(
+        "seconds because each item is one call into the game. DLC items are skipped",
+    ));
+    out.push(body(
+        "unless you press d on that screen: DLC ids are not in the base game's params.",
+    ));
     out.push(Line::from(""));
     out.push(title("Giving items"));
     out.push(body(
@@ -794,8 +902,21 @@ fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
         "when it hands you an item. The id carries the category nibble and the",
     ));
     out.push(body(
-        "the upgrade level picked with -/+, the quantity comes from ,/. . Linux has",
+        "the upgrade level picked with -/+, the quantity comes from ,/. . On a weapon",
     ));
+    out.push(body(
+        "enter opens an upgrade sheet: pick a level, then enter gives it. Somber",
+    ));
+    out.push(body(
+        "weapons stop at +10 and the rest at +25, and only items stack: 99 of a",
+    ));
+    out.push(body(
+        "consumable, one of anything else. Only the plain item is given — no infused",
+    ));
+    out.push(body(
+        "variants, because the game creates those from an ash of war, not from an id.",
+    ));
+    out.push(body("Linux has"));
     out.push(body(
         "no CreateRemoteThread, so eldencode borrows the game's main thread with",
     ));

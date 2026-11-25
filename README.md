@@ -86,6 +86,7 @@ left/right  (Items)     item type (sub-tabs)     s/S   change equip slot
 - and +     (Items)     upgrade level            ,/.   quantity
 e           (Items)     equip into the slot      t     theme
 enter       (Scripts)   run (enter twice)         esc   cancel / stop
+d           (Scripts)   include DLC item lists
 q           (anywhere)  quit, also during a run
 r                       refresh values           q     quit (ctrl-c too)
 ```
@@ -133,55 +134,124 @@ screen is an id that table would write.
 
 The Items screen adds real inventory items. On Windows the table does this with a
 code cave and `CREATETHREAD`; Linux has no remote-thread call, so EldenCode
-borrows the game's own main thread with `ptrace` for a single call:
+borrows one of the game's threads with `ptrace` for a single call.
+
+Enter on a **weapon** opens an upgrade sheet: pick the level with `←`/`→` and
+Enter gives it. The level lives in the item id (`Dagger` is row `1000000`, and
+`+25` is sent as `1000025`), so the sheet is just the level added to the family
+id. The amount still comes from `,`/`.`, and `esc` cancels.
+
+Only the plain item is offered. The table's item list also spells out infused
+variants (`1000100 Heavy Dagger`, `1000200 Keen Dagger`, … `1001200 Occult
+Dagger`), but the game builds an infused weapon from an ash of war, not from an
+id: sending one of those variants is what makes it fall over, so the item list
+drops them at load and the sheet never shows them.
 
 1. The AOB scans from the table resolve `InventoryAccessor` and `AddItemFunc`,
    and the inventory manager pointer is read the way the table's stub reads it
    (`[InventoryAccessor+0x19]` indexes the pointer at `InventoryAccessor+0x1D`).
-2. The item struct is filled from the table's `itembuffer` template: id at
+2. The buffer lives in memory the game allocated for us, not on a stack. The
+   table does the same (`alloc(itembuffer,4096,eldenring.exe)`) and only frees
+   it a tick after the run, because the game keeps reading that struct once
+   `AddItemFunc` returns. EldenCode builds the struct in the 4 KiB it borrows
+   from the parked thread's own stack, below the stack pointer, and the restore
+   never touches those bytes, so the struct is still there when the game reads
+   it. (An earlier version asked the game for its own 4 KiB through
+   `NtAllocateVirtualMemory`; that call was never reliable under Proton and
+   could take the game down, so it is gone — nothing is called inside the game
+   except the item routine itself.)
+3. The item struct is filled from the table's `itembuffer` template: id at
    `+0x24`, quantity at `+0x28`, ash of war at `+0x30`. The id is
    `(base | type << 28) + level`, using the table's `{0,1,2,4,8}` type table, so
    `2010000` (Short Sword) at +5 is sent as `2010005`.
-3. The main thread is attached, its registers and SSE/AVX state are saved, `RIP`
-   is pointed at `AddItemFunc` with `rcx=manager, rdx=&buffer+0x20,
-   r8=&buffer, r9=0`, and the return address is a `0xCC` byte found in the
-   image, so the thread traps as soon as the routine returns.
-4. Registers, extended state and the borrowed stack bytes are restored and the
+4. The call runs on a **parked** game thread, not the main one. The table runs
+   `itemgib` on a thread it creates with `executeCode`, so the game's loop keeps
+   running while the item is added — and that loop is what services the work the
+   routine sets off. Stealing the main thread both blocks the loop and risks
+   grabbing it while it holds a lock the routine needs. EldenCode picks a
+   secondary thread that is asleep in a wait (`/proc/<tid>/stat` state `S`/`D`)
+   and falls back to the main thread only if there is none.
+5. That thread is attached, its registers and SSE/AVX state are saved, `RIP` is
+   pointed at `AddItemFunc` with `rcx=manager, rdx=&buffer+0x20, r8=&buffer,
+   r9=0`, and the return address is a `0xCC` byte found in the image, so the
+   thread traps as soon as the routine returns.
+6. Registers, extended state and the borrowed stack bytes are restored and the
    thread is released with signal 0. Nothing is written into executable memory
-   and no code is injected.
+   and no code is injected, and the item buffer is never touched by the restore.
 
-Upgrade levels are capped per item: `+25` for smithing weapons, `+10` for somber
-ones, nothing for armour, talismans, items and spells.
+   The thread has to be one of the game's own Windows threads. Proton is Wine,
+   and Wine also runs unix-side helper threads that have no TEB at all; the item
+   routine reads the TEB through `gs:[0x30]`, so running on one of those
+   segfaults on address `0x30` within a few milliseconds. EldenCode therefore
+   attaches to a parked thread, reads its GS base, and releases it untouched when
+   that is zero, moving on to the next candidate. A real fault stops the search
+   instead of retrying. Every give is appended to
+   `~/.local/share/eldencode/call.log` with the thread used, its GS base and what
+   the routine returned.
+
+Ids are checked against the game's own params before anything is sent. On the
+first give EldenCode finds the tables in the game's memory: it walks the arena
+the game loads them into (from the top, because they are allocated late),
+recognises `EquipParamWeapon` by the `99999999` sentinel row every param ends
+with, and then reads every param header near it, keeping the tables that hold
+the ids it knows belong to each category. No offset out of the cheat table is
+used for this — the game's own data decides, so it keeps working when the game
+updates and the table's static offsets go stale (they already have).
+
+A row id is the item without its upgrade level: a Keen Dagger is row `1000200`,
+so `+5` is sent as `1000205` and checked as `1000200`. Anything that is not a
+row is refused, which is what the fabricated weapon ids were:
+
+```
+the game has no item param for 0x7A86C8 — refusing to send it
+```
+
+So an id the table has no row for is refused instead of crashing the game, and
+the item list only carries ids that have a plain row. If a category's table
+cannot be found — goods ids in this build are spread over several params — the
+check is skipped rather than blocking gives. `--params` prints the tables it found and checks a few ids, and only
+reads memory.
+
+Upgrade levels are capped per weapon from the table's own max-level list
+(`assets/weapon_levels.tsv`, generated from it): `+25` for smithing weapons,
+`+10` for somber ones, nothing for armour, talismans, items and spells. The cap
+is applied where the item struct is built, so nothing can send a somber weapon
+past +10 — that crashes the game. Consumables stack to 99 and nothing else
+stacks, so quantities are clamped to 99 for items and 1 for everything else,
+including in the bulk scripts.
 
 ## Bulk scripts
 
 Screen 7 runs the table's "give everything" actions through the same item
 routine, one call per item, redrawing a progress bar every few items (`esc`
-stops a run, `enter` twice starts one):
+stops a run, `enter` twice starts one). DLC items are **off by default** — press
+`d` on that screen to include them, because DLC item ids only exist in the item
+params when the expansion is actually loaded.
 
 | Script | What arrives |
 | --- | --- |
-| all weapons & shields | 479 weapons and shields, base game + DLC, at +0 |
+| all weapons & shields | 377 weapons and shields at +0 (479 with DLC) |
 | all weapons & shields, maxed | the same list at its top level — +25 smithing, +10 somber |
-| all armour | 706 helms, chest pieces, gauntlets and greaves |
-| all talismans | every talisman, including each +1 / +2 variant |
+| all armour | 561 helms, chest pieces, gauntlets and greaves (706 with DLC) |
+| all talismans | every talisman, including each +1 / +2 variant (154 with DLC) |
 | all talismans, strongest only | one per family, the highest +N variant |
 | all sorceries | 70 sorceries |
 | all incantations | 101 incantations |
 | all ashes of war | 116 ashes, ready to apply at a grace |
-| all crafting materials | 106 materials, 500 of each |
-| all arrows & bolts | 69 kinds of ammunition, 500 of each |
-| all consumables | 119 greases, pots, throwing items and food, 500 of each |
-| all reusable items | 27 reusables, one of each |
-| all upgrade materials | 39 smithing/somber stones and glovewort, 999 of each |
-| all maps, cookbooks & whetblades | 134 map fragments, cookbooks and whetblades |
+| all crafting materials | 67 materials, 99 of each (106 with DLC) |
+| all arrows & bolts | 64 kinds of ammunition, 99 of each (69 with DLC) |
+| all consumables | 76 greases, pots, throwing items and food, 99 of each (119 with DLC) |
+| all reusable items | 19 reusables, one of each (27 with DLC) |
+| all upgrade materials | 39 smithing/somber stones and glovewort, 99 of each |
+| all maps, cookbooks & whetblades | 84 map fragments, cookbooks and whetblades (134 with DLC) |
 | money bags | 99 of every rune item: golden, hero's, numen's, lord's |
 | unlock all graces | sets the event flag of every grace, base game + DLC |
 | activate all summoning pools | switches on every martyr effigy pool |
 
-The id lists in `assets/scripts.tsv` are the table's own bulk dropdowns (base and
-DLC lists merged, duplicates dropped), so each script adds the same set its
-counterpart does. Long runs mean thousands of ptrace calls; the game stays
+The id lists in `assets/scripts.tsv` are the table's own bulk dropdowns, with a
+per-row `dlc` flag so the base-game and DLC lists stay separate and duplicates
+are dropped. DLC rows are skipped unless DLC mode is on: those ids are what make
+a base-game install fall over when they are added. Long runs mean thousands of ptrace calls; the game stays
 playable but expects a few seconds of hitching, and your inventory has finite
 room — anything over the cap is simply not added.
 
