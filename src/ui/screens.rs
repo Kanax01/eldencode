@@ -140,7 +140,7 @@ fn session(app: &App, f: &mut Frame, area: Rect) {
         lines.push(Line::from(dim(format!("  save copy: {note}"), &theme)));
     }
     lines.push(Line::from(dim(
-        format!("  offsets: {}", offsets::TABLE),
+        format!("  offsets: built for {}", offsets::TABLE),
         &theme,
     )));
     widgets::lines_in(f, area, panel("session", &theme), lines, &theme, 0);
@@ -543,6 +543,99 @@ fn truncate(text: &str, width: usize) -> String {
     }
 }
 
+pub fn scripts(app: &App, f: &mut Frame, area: Rect) {
+    let theme = app.theme;
+    let block = panel("scripts", &theme);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 4 || inner.width < 24 {
+        return;
+    }
+    let rows = Layout::vertical([Constraint::Min(3), Constraint::Length(4)]).split(inner);
+
+    let mut lines: Vec<Line<'static>> = vec![Line::from(vec![
+        Span::raw("  "),
+        dim(
+            format!(
+                "{} bulk actions · each gives one item through the game's own routine",
+                crate::scripts::SCRIPTS.len()
+            ),
+            &theme,
+        ),
+    ])];
+    for (i, script) in crate::scripts::SCRIPTS.iter().enumerate() {
+        let picked = i == app.scripts.sel;
+        let marker = if picked { "▸ " } else { "  " };
+        let name_style = if picked {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text)
+        };
+        let count = app.script_counts.get(i).copied().unwrap_or(0);
+        let label = match script.kind {
+            crate::scripts::Kind::Items { .. } => format!("{count:>4} items"),
+            _ => "event flags".to_string(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker.to_string(), Style::default().fg(theme.accent)),
+            Span::styled(format!("{:<36}", script.name), name_style),
+            Span::styled(label, Style::default().fg(theme.muted)),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), rows[0]);
+
+    let sel = app.scripts.sel.min(crate::scripts::SCRIPTS.len() - 1);
+    let script = &crate::scripts::SCRIPTS[sel];
+    let mut detail: Vec<Line<'static>> = vec![Line::from(vec![
+        Span::raw("  "),
+        Span::styled(script.blurb.to_string(), Style::default().fg(theme.text)),
+    ])];
+    if let Some(progress) = &app.scripts.progress {
+        let width = 36usize.min(rows[1].width.saturating_sub(24) as usize);
+        let filled = if progress.total == 0 {
+            0
+        } else {
+            (progress.done * width / progress.total).min(width)
+        };
+        detail.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{:>4}/{:<4} ", progress.done, progress.total),
+                Style::default().fg(theme.accent),
+            ),
+            Span::styled("█".repeat(filled), Style::default().fg(theme.good)),
+            Span::styled("░".repeat(width - filled), Style::default().fg(theme.border)),
+            dim(format!("  {}", progress.name), &theme),
+        ]));
+    } else if app.scripts.pending == Some(app.scripts.sel) {
+        detail.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "press enter again to run · esc cancels",
+                Style::default()
+                    .fg(theme.warn)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    } else if let Some((text, ok)) = &app.scripts.last {
+        detail.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                text.clone(),
+                Style::default().fg(if *ok { theme.good } else { theme.warn }),
+            ),
+        ]));
+    } else {
+        detail.push(Line::from(vec![
+            Span::raw("  "),
+            dim("enter runs the highlighted script", &theme),
+        ]));
+    }
+    f.render_widget(Paragraph::new(detail), rows[1]);
+}
+
 pub fn help(app: &App, f: &mut Frame, area: Rect) {
     let theme = app.theme;
     let lines = help_lines(&theme);
@@ -570,15 +663,15 @@ fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
 
     out.push(title("What this is"));
     out.push(body(
-        "A terminal mod menu for Elden Ring. It resolves the same base pointers as the",
+        "A terminal mod menu for Elden Ring. It finds the game's base pointers by AOB",
     ));
     out.push(body(
-        "Hexinton All in One 8.0.4 Cheat Engine table (AOB scan + pointer chain) and",
+        "scanning the running image, walks their pointer chains, and writes the",
     ));
     out.push(body(
-        "writes the character record directly: runes, attributes, HP/FP/SP, debug flags",
+        "character record directly: runes, attributes, HP/FP/SP, debug flags,",
     ));
-    out.push(body("and equipment slots."));
+    out.push(body("equipment slots and inventory items."));
     out.push(Line::from(""));
     out.push(title("Proton and Linux"));
     out.push(body(
@@ -639,19 +732,22 @@ fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
         "4 Vitals        live HP / FP / stamina and their caps",
     ));
     out.push(body(
-        "5 Flags         the table's ChrDbg flags (no damage, no FP, ...)",
+        "5 Flags         ChrDbg flags (no damage, no FP consume, ...)",
     ));
     out.push(body(
         "6 Items         give any item (with level and quantity) or equip it directly",
     ));
     out.push(body(
-        "7 Process       detected processes, prefix, backup, diagnostics",
+        "7 Scripts       bulk actions: all weapons, armour, spells, materials, runes",
     ));
-    out.push(body("8 Help          this page"));
+    out.push(body(
+        "8 Process       detected processes, prefix, backup, diagnostics",
+    ));
+    out.push(body("9 Help          this page"));
     out.push(Line::from(""));
     out.push(title("Keys"));
     out.push(body(
-        "1-8 / tab / shift-tab  switch screens      F5  attach or re-scan",
+        "1-9 / tab / shift-tab  switch screens      F5  attach or re-scan",
     ));
     out.push(body(
         "↑↓ / k j               move               enter  edit or toggle",
@@ -666,12 +762,36 @@ fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
         "q / ctrl-c             quit                /  search items",
     ));
     out.push(Line::from(""));
-    out.push(title("Giving items"));
+    out.push(title("Bulk scripts"));
     out.push(body(
-        "enter in the Items screen calls the game's own item routine — the same one",
+        "The Scripts screen runs the give-everything actions: all weapons (plain or",
     ));
     out.push(body(
-        "the table reaches through ItemGib. The id carries the category nibble and",
+        "maxed), all armour, all talismans (every variant, or one strongest per",
+    ));
+    out.push(body(
+        "family), all sorceries, all incantations, all ashes of war, every crafting",
+    ));
+    out.push(body(
+        "material, arrow, consumable, reusable and upgrade material, every map,",
+    ));
+    out.push(body(
+        "cookbook and whetblade, and a stack of every rune item. Two more scripts set",
+    ));
+    out.push(body(
+        "event flags through the game's own setter: unlock all graces and activate all",
+    ));
+    out.push(body(
+        "summoning pools. enter twice starts, esc stops, q quits. Long runs take a few",
+    ));
+    out.push(body("seconds because each item is one call into the game."));
+    out.push(Line::from(""));
+    out.push(title("Giving items"));
+    out.push(body(
+        "enter in the Items screen calls the game's own item routine — the one it uses",
+    ));
+    out.push(body(
+        "when it hands you an item. The id carries the category nibble and the",
     ));
     out.push(body(
         "the upgrade level picked with -/+, the quantity comes from ,/. . Linux has",
@@ -697,7 +817,7 @@ fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
         "catalog knows (+25 smithing weapons, +10 somber); weapon ids already carry",
     ));
     out.push(body(
-        "their level in the last two digits, so +N is added the way the table does.",
+        "their level in the last two digits, so +N is added to the base id.",
     ));
     out
 }

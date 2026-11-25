@@ -11,6 +11,7 @@ use crate::game::{Game, Snapshot, Value};
 use crate::items::{Cat, Catalog};
 use crate::offsets::{self, Field, Kind};
 use crate::process;
+use crate::scripts::{Give, Kind as ScriptKind, Library, SCRIPTS};
 use crate::ui;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -23,18 +24,20 @@ pub enum Tab {
     Vitals,
     Flags,
     Items,
+    Scripts,
     Process,
     Help,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] = [
+    pub const ALL: [Tab; 9] = [
         Tab::Overview,
         Tab::Runes,
         Tab::Attributes,
         Tab::Vitals,
         Tab::Flags,
         Tab::Items,
+        Tab::Scripts,
         Tab::Process,
         Tab::Help,
     ];
@@ -47,6 +50,7 @@ impl Tab {
             Tab::Vitals => "Vitals",
             Tab::Flags => "Flags",
             Tab::Items => "Items",
+            Tab::Scripts => "Scripts",
             Tab::Process => "Process",
             Tab::Help => "Help",
         }
@@ -114,6 +118,20 @@ pub struct ItemsView {
     pub filtered: Vec<usize>,
 }
 
+pub struct ScriptsView {
+    pub sel: usize,
+    /// Script waiting for a second enter press.
+    pub pending: Option<usize>,
+    pub progress: Option<Progress>,
+    pub last: Option<(String, bool)>,
+}
+
+pub struct Progress {
+    pub done: usize,
+    pub total: usize,
+    pub name: String,
+}
+
 pub struct App {
     pub paths: Paths,
     pub cfg: Config,
@@ -129,6 +147,10 @@ pub struct App {
     pub focus: usize,
     pub edit: Option<Edit>,
     pub items: ItemsView,
+    pub scripts: ScriptsView,
+    pub script_lib: Library,
+    pub script_counts: Vec<usize>,
+    run_request: Option<usize>,
     pub toast: Option<Toast>,
     pub cache: HashMap<&'static str, Value>,
     pub cache_error: Option<String>,
@@ -176,6 +198,11 @@ impl App {
     pub fn new(paths: Paths, cfg: Config) -> App {
         let theme = ui::Theme::by_name(&cfg.theme);
         let catalog = Catalog::load();
+        let script_lib = Library::load();
+        let script_counts: Vec<usize> = SCRIPTS
+            .iter()
+            .map(|script| script_lib.resolve(script, &catalog).len())
+            .collect();
         let mut app = App {
             paths,
             cfg,
@@ -200,6 +227,15 @@ impl App {
                 qty: 1,
                 filtered: Vec::new(),
             },
+            scripts: ScriptsView {
+                sel: 0,
+                pending: None,
+                progress: None,
+                last: None,
+            },
+            script_lib,
+            script_counts,
+            run_request: None,
             toast: None,
             cache: HashMap::new(),
             cache_error: None,
@@ -242,6 +278,9 @@ impl App {
                         break;
                     }
                 }
+            }
+            if let Some(index) = self.run_request.take() {
+                self.execute_script(index, terminal)?;
             }
         }
         Ok(())
@@ -491,7 +530,7 @@ impl App {
                 self.goto(self.tab.prev());
                 return;
             }
-            KeyCode::Char(c @ '1'..='8') => {
+            KeyCode::Char(c @ '1'..='9') => {
                 self.goto(Tab::ALL[(c as u8 - b'1') as usize]);
                 return;
             }
@@ -501,6 +540,7 @@ impl App {
         match self.tab {
             Tab::Runes | Tab::Attributes | Tab::Vitals | Tab::Flags => self.field_key(key),
             Tab::Items => self.items_key(key),
+            Tab::Scripts => self.scripts_key(key),
             Tab::Process => self.process_key(key),
             Tab::Help => match key.code {
                 KeyCode::Down | KeyCode::Char('j') => self.help_scroll += 1,
@@ -774,6 +814,209 @@ impl App {
             }
             Err(err) => self.toast(err, ToastKind::Bad),
         }
+    }
+
+    fn scripts_key(&mut self, key: KeyEvent) {
+        let last = SCRIPTS.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scripts.sel = self.scripts.sel.saturating_sub(1);
+                self.scripts.pending = None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.scripts.sel < last {
+                    self.scripts.sel += 1;
+                }
+                self.scripts.pending = None;
+            }
+            KeyCode::Home => {
+                self.scripts.sel = 0;
+                self.scripts.pending = None;
+            }
+            KeyCode::End => {
+                self.scripts.sel = last;
+                self.scripts.pending = None;
+            }
+            KeyCode::Esc => self.scripts.pending = None,
+            KeyCode::Enter => {
+                if self.scripts.pending == Some(self.scripts.sel) {
+                    self.scripts.pending = None;
+                    self.run_request = Some(self.scripts.sel);
+                } else {
+                    self.scripts.pending = Some(self.scripts.sel);
+                    self.scripts.last = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Run a bulk script: one call per item or per flag, redrawing every few
+    /// steps so the progress bar moves and esc (or q) can stop it.
+    fn execute_script(&mut self, index: usize, terminal: &mut Tui) -> std::io::Result<()> {
+        let Some(script) = SCRIPTS.get(index) else {
+            return Ok(());
+        };
+        if self.game.is_none() {
+            self.toast("attach to the game first (F5)", ToastKind::Warn);
+            return Ok(());
+        }
+        match script.kind {
+            ScriptKind::Items { .. } => {
+                let gives = self.script_lib.resolve(script, &self.catalog);
+                self.run_gives(terminal, script.name, gives)
+            }
+            ScriptKind::UnlockGraces => {
+                self.run_flags(terminal, script.name, offsets::BONFIRE_LIST, true)
+            }
+            ScriptKind::SummoningPools => {
+                self.run_flags(terminal, script.name, offsets::PUDDLE_LIST, false)
+            }
+        }
+    }
+
+    fn run_gives(
+        &mut self,
+        terminal: &mut Tui,
+        label: &str,
+        gives: Vec<Give>,
+    ) -> std::io::Result<()> {
+        let total = gives.len();
+        if total == 0 {
+            self.toast(format!("{label}: nothing to give"), ToastKind::Warn);
+            return Ok(());
+        }
+
+        let mut given = 0usize;
+        let mut failed = 0usize;
+        let mut aborted = false;
+        for (i, (cat, id, qty, level)) in gives.iter().enumerate() {
+            let outcome = match self.game.as_ref() {
+                Some(game) => Some(game.give_item(*cat, *id, *qty, *level)),
+                None => None,
+            };
+            match outcome {
+                Some(Ok(_)) => given += 1,
+                Some(Err(_)) => failed += 1,
+                None => break,
+            }
+            if i % 6 == 0 || i + 1 == total {
+                let name = self
+                    .catalog
+                    .name_of(*id, *cat)
+                    .unwrap_or_else(|| format!("id {id}"));
+                self.scripts.progress = Some(Progress {
+                    done: i + 1,
+                    total,
+                    name,
+                });
+                terminal.draw(|frame| ui::draw(self, frame))?;
+                if event::poll(Duration::ZERO)? {
+                    if let Event::Key(key) = event::read()? {
+                        match key.code {
+                            KeyCode::Esc => {
+                                aborted = true;
+                                break;
+                            }
+                            KeyCode::Char('q') => {
+                                self.quit = true;
+                                aborted = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        self.scripts.progress = None;
+
+        let mut text = format!("{label}: {given}/{total} given");
+        if failed > 0 {
+            text.push_str(&format!(", {failed} failed"));
+        }
+        if aborted {
+            text.push_str(" — stopped early");
+        }
+        let ok = failed == 0 && !aborted;
+        self.scripts.last = Some((text.clone(), ok));
+        self.toast(text, if ok { ToastKind::Good } else { ToastKind::Warn });
+        self.repoll();
+        Ok(())
+    }
+
+    /// Set every flag of a param list through the game's setter.
+    fn run_flags(
+        &mut self,
+        terminal: &mut Tui,
+        label: &str,
+        list: u64,
+        flag_in_sub: bool,
+    ) -> std::io::Result<()> {
+        let flags = match self.game.as_ref() {
+            Some(game) => game.param_flag_ids(list, flag_in_sub),
+            None => return Ok(()),
+        };
+        let flags = match flags {
+            Ok(flags) => flags,
+            Err(err) => {
+                self.toast(format!("{label}: {err}"), ToastKind::Bad);
+                return Ok(());
+            }
+        };
+        let total = flags.len();
+        let mut set = 0usize;
+        let mut failed = 0usize;
+        let mut aborted = false;
+        for (i, flag) in flags.iter().enumerate() {
+            let outcome = match self.game.as_ref() {
+                Some(game) => Some(game.set_event_flag(*flag, true)),
+                None => None,
+            };
+            match outcome {
+                Some(Ok(())) => set += 1,
+                Some(Err(_)) => failed += 1,
+                None => break,
+            }
+            if i % 4 == 0 || i + 1 == total {
+                self.scripts.progress = Some(Progress {
+                    done: i + 1,
+                    total,
+                    name: format!("flag {flag}"),
+                });
+                terminal.draw(|frame| ui::draw(self, frame))?;
+                if event::poll(Duration::ZERO)? {
+                    if let Event::Key(key) = event::read()? {
+                        match key.code {
+                            KeyCode::Esc => {
+                                aborted = true;
+                                break;
+                            }
+                            KeyCode::Char('q') => {
+                                self.quit = true;
+                                aborted = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        self.scripts.progress = None;
+
+        let mut text = format!("{label}: {set}/{total} flags set");
+        if failed > 0 {
+            text.push_str(&format!(", {failed} failed"));
+        }
+        if aborted {
+            text.push_str(" — stopped early");
+        }
+        let ok = failed == 0 && !aborted;
+        self.scripts.last = Some((text.clone(), ok));
+        self.toast(text, if ok { ToastKind::Good } else { ToastKind::Warn });
+        self.repoll();
+        Ok(())
     }
 
     fn equip_selected(&mut self) {

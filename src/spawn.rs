@@ -27,11 +27,6 @@ const BUFFER_AT: u64 = 0x100;
 /// Where the borrowed return address sits (stack grows down from here).
 const STACK_TOP: u64 = 0x800;
 
-pub struct CallResult {
-    /// RAX as returned by the game routine.
-    pub returned: u64,
-}
-
 struct Attachment {
     tid: i32,
 }
@@ -172,15 +167,18 @@ fn trap_gadget(mem: &Memory, proc: &GameProcess) -> Result<u64, String> {
         .ok_or_else(|| "no int3 byte found in the executable image".to_string())
 }
 
-/// Call `add_item(inventory, &buffer+0x20, &buffer, 0)` on the game's main
-/// thread and return its RAX.
-pub fn call_add_item(
+/// Call a game routine on the main thread and return its RAX.
+///
+/// `bytes` is written into the borrowed buffer; `args` receives that buffer's
+/// address and returns the four register arguments (rcx, rdx, r8, r9) — the
+/// Windows x64 convention the game uses.
+pub fn call(
     mem: &Memory,
     proc: &GameProcess,
-    add_item: u64,
-    inventory: u64,
-    buffer: &[u8; 0x50],
-) -> Result<CallResult, String> {
+    target: u64,
+    bytes: &[u8],
+    args: &dyn Fn(u64) -> [u64; 4],
+) -> Result<u64, String> {
     let tid = proc.pid;
     let trap = trap_gadget(mem, proc)?;
 
@@ -201,20 +199,21 @@ pub fn call_add_item(
         .map_err(|err| format!("cannot snapshot the stack area: {err}"))?;
 
     let buffer_at = base + BUFFER_AT;
-    mem.write(buffer_at, buffer)
-        .map_err(|err| format!("cannot write the item buffer: {err}"))?;
+    mem.write(buffer_at, bytes)
+        .map_err(|err| format!("cannot write the call buffer: {err}"))?;
     let return_at = base + STACK_TOP - 8;
     mem.write(return_at, &trap.to_le_bytes())
         .map_err(|err| format!("cannot write the return address: {err}"))?;
 
+    let [rcx, rdx, r8, r9] = args(buffer_at);
     let mut regs = original;
-    regs.rip = add_item;
+    regs.rip = target;
     regs.rsp = return_at;
-    // Windows x64: rcx, rdx, r8, r9 — the same arguments the table's stub builds.
-    regs.rcx = inventory;
-    regs.rdx = buffer_at + 0x20;
-    regs.r8 = buffer_at;
-    regs.r9 = 0;
+    // Windows x64: rcx, rdx, r8, r9 — the same arguments the table's stubs build.
+    regs.rcx = rcx;
+    regs.rdx = rdx;
+    regs.r8 = r8;
+    regs.r9 = r9;
     set_regs(tid, &regs)?;
 
     if unsafe { libc::ptrace(libc::PTRACE_CONT, tid, 0, 0) } < 0 {
@@ -233,7 +232,7 @@ pub fn call_add_item(
     drop(attach);
 
     match outcome {
-        Ok(Some(signal)) if signal == libc::SIGTRAP => Ok(CallResult { returned }),
+        Ok(Some(signal)) if signal == libc::SIGTRAP => Ok(returned),
         Ok(Some(signal)) => Err(format!(
             "the item routine faulted (signal {signal}); nothing was added"
         )),

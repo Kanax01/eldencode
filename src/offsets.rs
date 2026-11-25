@@ -5,7 +5,7 @@
 //! `[GameDataMan]+8` + `0x6C` in Cheat Engine.
 
 /// Table these offsets came from; bumped when the game patches.
-pub const TABLE: &str = "Hexinton All in One 8.0.4 (game 1.17.1)";
+pub const TABLE: &str = "game 1.17.1";
 
 /// `define(LocalPlayerOffset,10EF8)` from the table's enable script.
 pub const LOCAL_PLAYER_OFFSET: u64 = 0x10EF8;
@@ -98,10 +98,22 @@ pub const SYMBOLS: &[SymbolDef] = &[
         "44 8B 61 1C 41 8B FC C1 EF 07 40 80 E7 01 41 C1 EC 08 41 80 E4 01 48 8B 0D",
     ),
     code(
+        "EventFlagSet",
+        "48 89 5C 24 08 48 89 74 24 18 57 48 83 EC 30 48 8B DA 41 0F B6 F8 8B 12 48 8B F1 85 D2 0F 84 ?? ?? ?? ??",
+    ),
+    code(
         "AddItemFunc",
         "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 70 FF FF FF 48 81 EC 90 01 00 00 48 C7 45 C8 FE FF FF FF 48 89 9C 24 D8 01 00 00 48 8B 05",
     ),
 ];
+
+/// Image-relative pointer to the param repository. The flag walks read it, then
+/// step through `+<list>`, `+0x80`, `+0x80` to reach a param list's rows.
+pub const PARAM_PTR: u64 = 0x3C80_158;
+/// Param list the graces ("bonfires") live in.
+pub const BONFIRE_LIST: u64 = 0xCA0;
+/// Param list of summoning-pool sign flags.
+pub const PUDDLE_LIST: u64 = 0x30A0;
 
 /// From the table's itemgib stub: `mov rax, InventoryAccessor+19; mov eax,[rax];
 /// cdqe; mov rcx, InventoryAccessor+1D; add rcx, rax; mov rcx,[rcx]`.

@@ -74,6 +74,7 @@ pub fn draw(app: &App, f: &mut Frame) {
             "ChrDbg flags · enter toggles, values are re-read live",
         ),
         Tab::Items => screens::items(app, f, rows[1]),
+        Tab::Scripts => screens::scripts(app, f, rows[1]),
         Tab::Process => screens::process(app, f, rows[1]),
         Tab::Help => screens::help(app, f, rows[1]),
     }
@@ -219,9 +220,9 @@ fn footer(app: &App, f: &mut Frame, message_area: Rect, keys_area: Rect) {
                 crate::config::display(&app.paths.config()),
                 Style::default().fg(theme.muted),
             ),
-            Span::styled("   ·   offsets ", Style::default().fg(theme.border)),
+            Span::styled("   ·   saves ", Style::default().fg(theme.border)),
             Span::styled(
-                crate::offsets::TABLE.to_string(),
+                crate::config::display(&app.paths.backups()),
                 Style::default().fg(theme.muted),
             ),
         ])

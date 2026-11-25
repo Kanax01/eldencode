@@ -288,8 +288,94 @@ impl Game {
             "the inventory manager is null — load a character before giving items".to_string()
         })?;
         let buffer = crate::items::item_buffer(cat, id, qty, level);
-        let result = crate::spawn::call_add_item(&self.mem, &self.proc, add_item, inventory, &buffer)?;
-        Ok(result.returned)
+        crate::spawn::call(&self.mem, &self.proc, add_item, &buffer, &|at| {
+            [inventory, at + 0x20, at, 0]
+        })
+    }
+
+    pub fn event_flag_setter(&self) -> Option<u64> {
+        self.symbols.get("EventFlagSet").copied()
+    }
+
+    pub fn event_flag_manager(&self) -> Option<u64> {
+        let global = self.symbols.get("EventFlagMan").copied()?;
+        let manager = self.mem.read_u64(global).ok()?;
+        if manager < 0x10000 {
+            None
+        } else {
+            Some(manager)
+        }
+    }
+
+    /// Set (or clear) one event flag through the game's own setter, with the
+    /// same arguments the table's `SetEventFlag` stub builds: manager in RCX, a
+    /// pointer to the id in RDX, the value in R8B.
+    pub fn set_event_flag(&self, id: u32, on: bool) -> Result<(), String> {
+        let setter = self
+            .event_flag_setter()
+            .ok_or_else(|| "the event flag setter was not found in this build".to_string())?;
+        let manager = self
+            .event_flag_manager()
+            .ok_or_else(|| "the event flag manager is null — load a save first".to_string())?;
+        let bytes = id.to_le_bytes();
+        crate::spawn::call(&self.mem, &self.proc, setter, &bytes, &|at| {
+            [manager, at, u64::from(on), 0]
+        })?;
+        Ok(())
+    }
+
+    /// Walk one of the game's param lists and collect the event flag id of every
+    /// row, mirroring the table's unlock loops: the list head is reached through
+    /// `[PARAM_PTR]` → `+list` → `+0x80` → `+0x80`, rows start at `+0x40` with a
+    /// stride of `0x18`, and each row holds its flag either at `+0` or behind the
+    /// offset stored at `+8` (flag at that target `+4`).
+    pub fn param_flag_ids(&self, list: u64, flag_in_sub: bool) -> Result<Vec<u32>, String> {
+        let mut ptr = self
+            .mem
+            .read_u64(self.proc.base + offsets::PARAM_PTR)
+            .map_err(|err| format!("cannot read the param repository: {err}"))?;
+        for step in [list, 0x80, 0x80] {
+            if ptr < 0x10000 {
+                return Err("the param repository is null — load a save first".to_string());
+            }
+            ptr = self
+                .mem
+                .read_u64(ptr + step)
+                .map_err(|err| format!("cannot walk the param list: {err}"))?;
+        }
+        let head = ptr;
+        let packed = self
+            .mem
+            .read_u32(head + 8)
+            .map_err(|err| format!("cannot read the list header: {err}"))?;
+        let count = ((packed >> 16) & 0xFFFF) as usize;
+        if count == 0 || count > 5000 {
+            return Err(format!(
+                "the list reports {count} rows — the param layout may have changed"
+            ));
+        }
+        let mut flags = Vec::with_capacity(count);
+        for row in 0..count {
+            let entry = head + 0x40 + row as u64 * 0x18;
+            let id = if flag_in_sub {
+                let offset = self
+                    .mem
+                    .read_u32(entry + 8)
+                    .map_err(|err| format!("row {row}: {err}"))? as u64;
+                self.mem
+                    .read_u32(head + offset + 4)
+                    .map_err(|err| format!("row {row}: {err}"))?
+            } else {
+                self.mem
+                    .read_u32(entry)
+                    .map_err(|err| format!("row {row}: {err}"))?
+            };
+            if id == 0 || id > 10_000_000 {
+                return Err(format!("row {row} has an implausible flag id {id:#X}"));
+            }
+            flags.push(id);
+        }
+        Ok(flags)
     }
 
     /// `(symbol, resolved address)` for diagnostics; `None` means the AOB scan

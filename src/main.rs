@@ -5,6 +5,7 @@ mod game;
 mod items;
 mod mem;
 mod offsets;
+mod scripts;
 mod spawn;
 mod process;
 mod ui;

@@ -15,7 +15,7 @@ ratatui interface in your terminal.
 │ ● attached  eldenring.exe        ││ Name        Melina                   │
 │ Process id      48213            ││ Level       137   runes 4200318      │
 │ Image base      0x140000000      ││ HP       ████████████░░░░  1450/1780 │
-│ Symbols         8/8 resolved     ││ FP       ██████████████░░   220/240  │
+│ Symbols         9/9 resolved     ││ FP       ██████████████░░   220/240  │
 ╰──────────────────────────────────╯╰──────────────────────────────────────╯
 ```
 
@@ -29,8 +29,9 @@ ratatui interface in your terminal.
 | **4 Vitals** | live HP / FP / stamina and their caps |
 | **5 Flags** | the table's ChrDbg block: no dead, no damage, no FP consume, no stamina consume, no goods consume, no AI, plus per-character "disable gravity / map collision" |
 | **6 Items** | sub-tabs per item type over 6,523 ids (weapons, armour, talismans, items, ashes of war, spells); `enter` gives the item to your inventory at the chosen upgrade level and quantity, `e` equips it into a ChrAsm slot of your choice |
-| **7 Process** | every matching game process, its Proton prefix, the saves found there, diagnostics, save backup |
-| **8 Help** | the same information as text, including the permission fix |
+| **7 Scripts** | bulk actions that run the give-routine once per item: all weapons (plain or maxed), all armour, all talismans (every variant or one strongest per family), all sorceries, all incantations, all ashes of war, every crafting material at 500 each, a stack of every rune item — with a progress bar and `esc` to stop |
+| **8 Process** | every matching game process, its Proton prefix, the saves found there, diagnostics, save backup |
+| **9 Help** | the same information as text, including the permission fix |
 
 Every screen reads values back from the process, so what you see is what the
 game currently holds.
@@ -77,13 +78,15 @@ Manual build: `cargo build --release && ./target/release/eldencode`.
 ## Keys
 
 ```
-1-8 / tab / shift-tab   switch screens          F5    attach or re-scan
+1-9 / tab / shift-tab   switch screens          F5    attach or re-scan
 up/down, k/j            move                    enter give item (Items) / edit
 a, m        (Runes)     add 1M / set max         b     back up save
 /           (Items)     search                   x     clear search
 left/right  (Items)     item type (sub-tabs)     s/S   change equip slot
 - and +     (Items)     upgrade level            ,/.   quantity
 e           (Items)     equip into the slot      t     theme
+enter       (Scripts)   run (enter twice)         esc   cancel / stop
+q           (anywhere)  quit, also during a run
 r                       refresh values           q     quit (ctrl-c too)
 ```
 
@@ -150,6 +153,46 @@ borrows the game's own main thread with `ptrace` for a single call:
 Upgrade levels are capped per item: `+25` for smithing weapons, `+10` for somber
 ones, nothing for armour, talismans, items and spells.
 
+## Bulk scripts
+
+Screen 7 runs the table's "give everything" actions through the same item
+routine, one call per item, redrawing a progress bar every few items (`esc`
+stops a run, `enter` twice starts one):
+
+| Script | What arrives |
+| --- | --- |
+| all weapons & shields | 479 weapons and shields, base game + DLC, at +0 |
+| all weapons & shields, maxed | the same list at its top level — +25 smithing, +10 somber |
+| all armour | 706 helms, chest pieces, gauntlets and greaves |
+| all talismans | every talisman, including each +1 / +2 variant |
+| all talismans, strongest only | one per family, the highest +N variant |
+| all sorceries | 70 sorceries |
+| all incantations | 101 incantations |
+| all ashes of war | 116 ashes, ready to apply at a grace |
+| all crafting materials | 106 materials, 500 of each |
+| all arrows & bolts | 69 kinds of ammunition, 500 of each |
+| all consumables | 119 greases, pots, throwing items and food, 500 of each |
+| all reusable items | 27 reusables, one of each |
+| all upgrade materials | 39 smithing/somber stones and glovewort, 999 of each |
+| all maps, cookbooks & whetblades | 134 map fragments, cookbooks and whetblades |
+| money bags | 99 of every rune item: golden, hero's, numen's, lord's |
+| unlock all graces | sets the event flag of every grace, base game + DLC |
+| activate all summoning pools | switches on every martyr effigy pool |
+
+The id lists in `assets/scripts.tsv` are the table's own bulk dropdowns (base and
+DLC lists merged, duplicates dropped), so each script adds the same set its
+counterpart does. Long runs mean thousands of ptrace calls; the game stays
+playable but expects a few seconds of hitching, and your inventory has finite
+room — anything over the cap is simply not added.
+
+The two flag scripts work differently: they walk a param list through the param
+repository (`[base+0x3C80158]` → list offset → `+0x80` → `+0x80`, rows from
+`+0x40` at a stride of `0x18`), then call the game's event-flag setter once per
+row with `rcx` = flag manager, `rdx` = pointer to the id, `r8b` = 1 — the same
+stub the table's unlock scripts use. Rows are validated before anything is
+written (sane count, plausible flag ids) and the run aborts on the first
+surprise.
+
 When FromSoftware ships a patch, base pointers move. The AOB scan then misses and
 the Overview/Process screens say which symbols failed instead of writing to a
 guess.
@@ -178,6 +221,7 @@ guess.
 Cargo.toml            ratatui 0.29, crossterm 0.28, serde/toml, libc
 install.sh            crux-style installer (fresh build, ~/.eldencode, PATH block)
 assets/items.tsv      item catalog extracted from the cheat table
+assets/scripts.tsv    id lists behind the bulk scripts (base + DLC, deduped)
 src/main.rs           CLI, terminal lifecycle
 src/config.rs         ~/.eldencode paths and config.toml
 src/process.rs        /proc discovery, image base, regions, Proton prefix, save backup
@@ -186,6 +230,7 @@ src/aob.rs            Cheat Engine style AOB pattern scanner
 src/offsets.rs        symbols, pointer chains, field tables
 src/game.rs           attach, chain resolution, read/write, snapshot, runes, equip, give_item
 src/spawn.rs          ptrace remote call into the game's item routine
+src/scripts.rs        bulk script lists and their resolution
 src/items.rs          item catalog
 src/app.rs            state, input, editing
 src/ui/               theme, widgets, screens
