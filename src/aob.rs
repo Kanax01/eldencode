@@ -1,9 +1,5 @@
 use crate::mem::Memory;
 
-/// A byte pattern in the same notation Cheat Engine tables use: hex bytes plus
-/// wildcards (`??`, `?`, `xx`). Tokens may also be glued together, which the
-/// Hexinton table does in places (`48 8B 05 ???????? 80 B8 ...`), so every
-/// token is re-split into byte pairs.
 #[derive(Clone, Debug)]
 pub struct Pattern {
     mask: Vec<Option<u8>>,
@@ -52,9 +48,6 @@ impl Pattern {
 
 const CHUNK: usize = 1 << 20;
 
-/// Scan readable regions for a pattern. Returns absolute addresses of the first
-/// `limit` hits. Chunks overlap by `pattern.len() - 1` so matches on a boundary
-/// are not missed.
 pub fn find(mem: &Memory, regions: &[(u64, u64)], pattern: &Pattern, limit: usize) -> Vec<u64> {
     let mut hits = Vec::new();
     if pattern.len() == 0 || limit == 0 {
@@ -68,7 +61,7 @@ pub fn find(mem: &Memory, regions: &[(u64, u64)], pattern: &Pattern, limit: usiz
             let want = ((end - pos) as usize).min(CHUNK);
             let mut buf = vec![0u8; want];
             if mem.read(pos, &mut buf).is_err() {
-                // Unreadable page inside a mapped region: step past it.
+
                 pos += 4096;
                 continue;
             }

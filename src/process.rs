@@ -1,9 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A running copy of the game. Under Steam/Proton the Windows exe is an
-/// ordinary Linux process (Wine hosts the PE image), so everything is discovered
-/// through /proc — no Windows API and no memory driver.
 #[derive(Clone, Debug)]
 pub struct GameProcess {
     pub pid: i32,
@@ -78,7 +75,7 @@ fn image_base(pid: i32, needle: &str) -> (u64, u64, Option<PathBuf>) {
     let mut image: Option<PathBuf> = None;
     if let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) {
         for line in maps.lines() {
-            // address perms offset dev inode path
+
             let mut parts = line.splitn(6, ' ');
             let Some(range) = parts.next() else { continue };
             let _perms = parts.next();
@@ -133,7 +130,6 @@ fn prefix_of(pid: i32) -> Option<PathBuf> {
     found
 }
 
-/// Every process whose command line or comm matches `needle` (the game exe).
 pub fn scan(needle: &str) -> Vec<GameProcess> {
     let needle_lower = needle.to_ascii_lowercase();
     let mut out = Vec::new();
@@ -160,16 +156,14 @@ pub fn scan(needle: &str) -> Vec<GameProcess> {
             image,
         });
     }
-    // A process without an image mapping is a zombie or a launcher stub: its
-    // /proc/<pid>/mem is unreadable, so never offer it as the game.
+
     out.retain(|p| p.base != 0);
     out.sort_by_key(|p| p.pid);
     out
 }
 
-/// Base address of a module, taken from the mapping that starts at file
 #[allow(dead_code)]
-/// offset 0 — the same base the loader used.
+
 pub fn module_base(pid: i32, name: &str) -> Option<u64> {
     let needle = name.to_ascii_lowercase();
     let maps = fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
@@ -195,7 +189,6 @@ pub fn module_base(pid: i32, name: &str) -> Option<u64> {
     None
 }
 
-/// Is this address inside a mapping the process may execute?
 #[allow(dead_code)]
 pub fn is_executable(pid: i32, addr: u64) -> bool {
     let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) else {
@@ -221,7 +214,6 @@ pub fn is_executable(pid: i32, addr: u64) -> bool {
     false
 }
 
-/// Readable, non-special mappings of a process.
 pub fn regions(pid: i32) -> Vec<(u64, u64)> {
     let mut out = Vec::new();
     if let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) {
@@ -248,7 +240,6 @@ pub fn regions(pid: i32) -> Vec<(u64, u64)> {
     out
 }
 
-/// The game image's executable pages, i.e. where a `int3` gadget can live.
 pub fn image_exec_regions(proc: &GameProcess) -> Vec<(u64, u64)> {
     let mut out = Vec::new();
     if let Ok(maps) = fs::read_to_string(format!("/proc/{}/maps", proc.pid)) {
@@ -274,7 +265,6 @@ pub fn image_exec_regions(proc: &GameProcess) -> Vec<(u64, u64)> {
     out
 }
 
-/// The game image's readable pages, i.e. where AOB scans run.
 pub fn image_regions(proc: &GameProcess) -> Vec<(u64, u64)> {
     let start = proc.base;
     let end = proc.base.saturating_add(proc.size);
@@ -284,7 +274,6 @@ pub fn image_regions(proc: &GameProcess) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// Character saves (`ER0000.sl2`) inside the Proton prefix.
 pub fn saves(prefix: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let users = prefix.join("drive_c/users");
@@ -311,7 +300,7 @@ fn stamp() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0) as i64;
-    // Howard Hinnant's civil_from_days.
+
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let z = days + 719_468;
@@ -332,7 +321,6 @@ fn stamp() -> String {
     )
 }
 
-/// Copy every save found in the prefix into `backups/<timestamp>/`.
 pub fn backup_saves(proc: &GameProcess, backups: &Path) -> Result<Vec<PathBuf>, String> {
     let Some(prefix) = &proc.prefix else {
         return Err(

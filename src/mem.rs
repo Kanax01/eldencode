@@ -3,9 +3,6 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 
-/// Errors a memory access can produce. `Permission` is pulled out because on
-/// Linux it almost always means the kernel refuses cross-process access
-/// (yama ptrace_scope), not that the pointer was bad.
 #[derive(Debug)]
 pub enum MemError {
     Permission,
@@ -23,9 +20,6 @@ impl std::fmt::Display for MemError {
     }
 }
 
-/// Read/write access to another process. Elden Ring under Proton is an ordinary
-/// Linux process (a Wine-hosted PE image), so `/proc/<pid>/mem` plus
-/// process_vm_readv/writev is enough — no driver and no Windows API involved.
 pub struct Memory {
     pid: i32,
     file: File,
@@ -69,7 +63,7 @@ impl Memory {
                 return Err(MemError::Permission);
             }
         }
-        // Partial reads happen at region edges; /proc/pid/mem handles those.
+
         self.file
             .read_exact_at(buf, addr)
             .map_err(|err| match err.kind() {

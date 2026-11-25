@@ -67,7 +67,7 @@ pub fn display(path: &Path) -> String {
 pub struct Config {
     pub theme: String,
     pub animations: bool,
-    /// Process image name to look for under /proc (Proton runs the Windows exe).
+
     pub process: String,
     pub auto_attach: bool,
     pub backup_on_attach: bool,

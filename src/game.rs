@@ -60,46 +60,36 @@ pub struct Game {
     pub failed_symbols: Vec<&'static str>,
     pub scanned_mb: f64,
     pub regions: usize,
-    /// Item param tables discovered in the game's memory.
+
     param_tables: std::sync::OnceLock<Vec<Option<ParamTable>>>,
-    /// The flask level and tool-swap routines, scanned once per session.
+
     flask_routines: std::sync::OnceLock<(u64, u64)>,
-    /// The real event flag setter, scanned once per session.
+
     flag_setter: std::sync::OnceLock<u64>,
 }
 
-/// One of the game's param tables (`EquipParamWeapon` and friends): a header
-/// with the row count, then a sorted index of `{ id, data offset, checksum }`
-/// entries of 0x18 bytes at `+0x40`. Row ids are 64-bit and every table ends
-/// with a `PARAM_SENTINEL` row.
 #[derive(Clone, Copy)]
 pub struct ParamTable {
     pub head: u64,
     pub rows: u32,
 }
 
-/// The row id every param table ends with.
 const PARAM_SENTINEL: u64 = 99_999_999;
-/// How much of the game's memory is read at a time while looking for params.
+
 const SCAN_CHUNK: usize = 8 << 20;
-/// Params live in the big writable mappings; smaller ones are not worth a scan.
+
 const SCAN_MIN_REGION: u64 = 64 << 20;
-/// How far around a found table the other param tables are looked for.
+
 const SCAN_WINDOW_BACK: u64 = 384 << 20;
 const SCAN_WINDOW_FORWARD: u64 = 64 << 20;
 
-/// The most flask charges Golden Seeds unlock, crimson plus cerulean.
 const FLASK_CHARGES: u32 = 14;
 
-/// The table's `ActivateBonfire`: writes the flask level in and refills.
 const ACTIVATE_BONFIRE_PATTERN: &str = "88 4c ?? ?? 53 ?? 83 ec ?? c6 44 ?? ?? 63 c6 44 ?? ?? 01 80 f9 01";
 
-/// The real event flag setter, the table's `EventFlag_C1`. The exported symbol
-/// is a wrapper that takes different arguments, so this is scanned instead.
 const EVENT_FLAG_SET_PATTERN: &str =
     "48 89 5C 24 08 48 89 74 24 18 57 48 83 EC 30 48 8B DA 41 0F B6 F8 8B 12 48 8B F1 85 D2 0F 84 ?? ?? ?? ??";
 
-/// The table's `ReplaceTool`, which the pattern lands 0x19 bytes after.
 const REPLACE_TOOL_PATTERN: &str =
     "?? 0f b6 f1 ?? 8b d8 ?? 8b f9 81 e2 ff ff ff 0f 0f ba ea ?? 89 54 ?? ?? ?? 81 c1";
 
@@ -112,9 +102,7 @@ fn add_signed(base: u64, offset: i64) -> Option<u64> {
 }
 
 impl Game {
-    /// Open the process and resolve every symbol by scanning the image. This is
-    /// the slow part of attaching (a few seconds on a cold CPU cache), so it is
-    /// only done on attach or explicit rescan.
+
     pub fn attach(proc: GameProcess) -> Result<Game, AttachError> {
         let mem = Memory::open(proc.pid).map_err(|err| match err {
             MemError::Permission => AttachError {
@@ -187,9 +175,6 @@ impl Game {
         })
     }
 
-    /// Walk a Cheat Engine pointer chain: dereference the symbol's global, apply
-    /// the table's offsets from last to first with a dereference each step, and
-    /// add the first offset to land on the field.
     fn resolve(&self, field: &Field) -> Result<u64, String> {
         let base = self
             .symbols
@@ -294,8 +279,6 @@ impl Game {
         Ok(next)
     }
 
-    /// Pointer the game's item routine expects in RCX, resolved the way the
-    /// table's stub does it.
     pub fn inventory_manager(&self) -> Option<u64> {
         let accessor = self.symbols.get("InventoryAccessor").copied()?;
         let disp = self
@@ -311,12 +294,6 @@ impl Game {
         }
     }
 
-    /// Is a character actually loaded?
-    ///
-    /// The item routine walks the local player on its way to the inventory, so
-    /// calling it from the title screen or a loading screen faults inside the
-    /// game. The vitals chain is the same one the table uses for HP: it is null
-    /// until you are in the world.
     pub fn in_game(&self) -> bool {
         match offsets::VITALS.first() {
             Some(field) => self.resolve(field).is_ok(),
@@ -334,7 +311,6 @@ impl Game {
             .ok()
     }
 
-    /// Is `id` one of this table's rows? The index is sorted, so search it.
     pub fn table_has(&self, table: ParamTable, id: u64) -> bool {
         let (mut low, mut high) = (0u32, table.rows);
         while low < high {
@@ -349,9 +325,6 @@ impl Game {
         false
     }
 
-    /// Walk back from a row to the table that owns it: the rows above it must
-    /// ascend into the header, and the header's row count must be the number of
-    /// rows walked. Everything else in memory is rejected by that.
     fn table_at_row(&self, row: u64) -> Option<ParamTable> {
         let mut start = row;
         let mut steps = 0u64;
@@ -379,8 +352,6 @@ impl Game {
         Some(ParamTable { head, rows })
     }
 
-    /// The same search, from the end of the range backwards: the game's params
-    /// are allocated late, at the top of the arena.
     fn scan_params_back(
         &self,
         lo: u64,
@@ -434,8 +405,6 @@ impl Game {
         targets.iter().all(|(index, _)| out[*index].is_some())
     }
 
-    /// A table addressed by its header: the only reliable way in, because it
-    /// checks the row count against the whole index.
     fn table_at_head(&self, head: u64) -> Option<ParamTable> {
         let packed = self.mem.read_u32(head + 8).ok()?;
         if packed & 0xFFFF > 0xF0 {
@@ -462,8 +431,6 @@ impl Game {
         Some(ParamTable { head, rows })
     }
 
-    /// Every param header carries this at `+4`; find them all in one range and
-    /// keep the ones that are a whole category's table.
     fn scan_param_headers(
         &self,
         lo: u64,
@@ -513,24 +480,14 @@ impl Game {
         }
     }
 
-    /// Find each category's param table by scanning the game's memory for an id
-    /// the table must contain — for weapons the sentinel row every table ends
-    /// with — then checking that the table really holds that category's ids.
-    ///
-    /// Weapons are looked for first and everything else is searched only around
-    /// the table found that way, because the game keeps its params together:
-    /// scanning every large mapping would take half a minute.
     fn discover_params(&self) -> Vec<Option<ParamTable>> {
         let cats = crate::items::Cat::ALL;
         let mut out: Vec<Option<ParamTable>> = vec![None; cats.len()];
         let probes: Vec<Vec<u32>> = cats.iter().map(|cat| crate::items::probe_ids(*cat)).collect();
-        // Every probe id is an anchor: one of them is always a row, and a hit
-        // is only accepted when the table holds the category's other ids too.
+
         let mut anchors: Vec<(usize, u64)> = Vec::new();
         for (index, ids) in probes.iter().enumerate() {
-            // A weapon table ends with the sentinel row, which finds all three
-            // copies of it at once; the other tables are found by their own ids
-            // and confirmed by holding a second one.
+
             if cats[index] == crate::items::Cat::Weapon {
                 anchors.push((index, PARAM_SENTINEL));
             }
@@ -576,7 +533,6 @@ impl Game {
         out
     }
 
-    /// The param table holding a category's items, discovered once per session.
     pub fn item_param(&self, cat: crate::items::Cat) -> Option<ParamTable> {
         let tables = self.param_tables.get_or_init(|| self.discover_params());
         let index = crate::items::Cat::ALL
@@ -585,16 +541,8 @@ impl Game {
         tables.get(index).copied().flatten()
     }
 
-    /// Does the game have an item param for this id?
-    ///
-    /// `None` means it could not be checked, which must not block a give;
-    /// `Some(false)` means the id does not exist, and sending it is what makes
-    /// the game fall over, so it is refused.
     pub fn has_item(&self, cat: crate::items::Cat, id: u32) -> Option<bool> {
-        // Callers pass an item id; the id the routine is called with carries the
-        // category nibble (`0x20000000 | 1000` for a talisman), and the table
-        // stores the bare row. Strip it before comparing, or every category but
-        // weapons is refused even though its row exists.
+
         let id = id & 0x0FFF_FFFF;
         let table = self.item_param(cat)?;
         if self.table_has(table, u64::from(id)) {
@@ -603,15 +551,11 @@ impl Game {
         if cat != crate::items::Cat::Weapon {
             return Some(false);
         }
-        // A weapon's upgrade level rides on top of the row id: a Dagger +5 is
-        // row 1000000 sent as 1000005.
+
         let base = id - id % 100;
         Some(base != id && self.table_has(table, u64::from(base)))
     }
 
-    /// Add an item to the inventory by calling the game's own routine, exactly
-    /// like the cheat table's ItemGib: the id carries the category nibble and
-    /// the upgrade level, the quantity goes in its own field.
     pub fn give_item(
         &self,
         cat: crate::items::Cat,
@@ -630,7 +574,7 @@ impl Game {
                 "no character is loaded — stand in the world before giving items".to_string(),
             );
         }
-        // Never send an id the game has no param row for: that is what crashes.
+
         let plain = crate::items::plain_id(cat, id, level);
         if self.has_item(cat, plain) == Some(false) {
             return Err(format!(
@@ -661,8 +605,7 @@ impl Game {
         let found = Pattern::parse(EVENT_FLAG_SET_PATTERN)
             .ok()
             .and_then(|pattern| aob::find(&self.mem, &regions, &pattern, 1).into_iter().next())
-            // The exported symbol is a last resort: on this build it takes
-            // different arguments and writes nothing.
+
             .or_else(|| self.symbols.get("EventFlagSet").copied())?;
         let _ = self.flag_setter.set(found);
         Some(found)
@@ -678,8 +621,6 @@ impl Game {
         }
     }
 
-    /// The local player's game data, `[GameDataMan]+8` — the chain the table
-    /// calls `playerGameData`. Flask state hangs off it.
     pub fn player_game_data(&self) -> Option<u64> {
         let global = self.symbols.get("GameDataMan").copied()?;
         let game_data = self.mem.read_u64(global).ok()?;
@@ -687,16 +628,16 @@ impl Game {
         (player > 0x10000).then_some(player)
     }
 
-    /// One byte out of the flag block. The block holds one byte per flag id,
-    /// which is why the table writes a byte where a flag changes.
-    pub fn event_flag_byte(&self, id: u32) -> Option<u8> {
-        let block = self.event_flag_block()?;
-        self.mem.read_u8(block + u64::from(id)).ok()
+    pub fn event_flag_block(&self) -> Option<u64> {
+        let manager = self.event_flag_manager()?;
+        let block = self.mem.read_u64(manager + 0x28).ok()?;
+        if block < 0x10000 {
+            None
+        } else {
+            Some(block)
+        }
     }
 
-    /// The flask charges, `EstusFlaskAllocateNum_byHp` and `_byMp` at
-    /// `playerGameData+0x101` / `+0x102`. The two add up to the number of flasks
-    /// carried, so they are topped up together to fourteen, crimson first.
     pub fn max_flask_charges(&self) -> Result<(u8, u8), String> {
         let player = self
             .player_game_data()
@@ -720,8 +661,6 @@ impl Game {
         Ok((hp_new, mp_new))
     }
 
-    /// The two routines the table's flask-level script needs, each found by its
-    /// own pattern in the image and cached for the session.
     fn flask_routines(&self) -> Result<(u64, u64), String> {
         if let Some(found) = self.flask_routines.get() {
             return Ok(*found);
@@ -736,9 +675,7 @@ impl Game {
         .into_iter()
         .next()
         .ok_or_else(|| {
-            "the flask level routine was not found in this build \
-             (game update? try again after a fresh attach)"
-                .to_string()
+            "the flask level routine was not found in this build (game update?)".to_string()
         })?;
         let replace = aob::find(
             &self.mem,
@@ -754,21 +691,12 @@ impl Game {
         Ok((activate, replace))
     }
 
-    /// Take both flasks to +12, the highest Sacred Tears go, the way the table's
-    /// "Set flask level" entry does: swap the equipped flask tools up to their
-    /// top variant, then let the game's own activate routine write the new level
-    /// in and refill.
     pub fn max_flask_charge(&self) -> Result<(u32, bool), String> {
         let (activate, replace) = self.flask_routines()?;
         let player = self
             .player_game_data()
             .ok_or_else(|| "the player data is null — load a character first".to_string())?;
         let equip = player + 0x2B0;
-        // Flask ids carry the level in steps of two: 1000 is a +0 crimson flask
-        // and 1024 a +12 one. ReplaceTool takes the equipment block, the id to
-        // find and the id to put in its place, and does nothing when that id is
-        // not there, so every level is offered rather than guessing the current
-        // one out of the game's own patched immediate.
         let mut swapped = false;
         for base in [1000u64, 1001, 1050, 1051] {
             for level in 0..=12u64 {
@@ -777,9 +705,6 @@ impl Game {
                 if from == to {
                     continue;
                 }
-                // A swap that finds no such flask returns non-zero, so a run
-                // where every call misses is a run where the flasks were
-                // already at +12.
                 let returned =
                     crate::spawn::call_args(&self.mem, &self.proc, replace, [equip, from, to, 1])?;
                 if returned == 0 {
@@ -787,27 +712,26 @@ impl Game {
                 }
             }
         }
-        // ActivateBonfire(13) is flask level +12; it also refills the flasks.
         crate::spawn::call_args(&self.mem, &self.proc, activate, [13, 0, 0, 0])?;
         Ok((12, swapped))
     }
 
-    /// Base of the event flag block, `[[EventFlagMan]+0x28]`: the pointer the
-    /// table's boss scripts write their bytes through.
-    pub fn event_flag_block(&self) -> Option<u64> {
-        let manager = self.event_flag_manager()?;
-        let block = self.mem.read_u64(manager + 0x28).ok()?;
-        if block < 0x10000 {
-            None
-        } else {
-            Some(block)
-        }
+    pub fn flag_byte_at(&self, offset: u64) -> Option<u8> {
+        let block = self.event_flag_block()?;
+        self.mem.read_u8(block + offset).ok()
     }
 
-    /// Write one byte of the flag block, the way the table's kill/revive
-    /// entries do: `0x00` leaves a boss alive, `0xFF` marks it dead. One byte
-    /// covers the whole group of flags a boss defeat touches, which is why the
-    /// table writes a byte instead of a single bit.
+    fn flag_spot(&self, id: u32) -> Option<(u64, u8)> {
+        let relative = id.checked_sub(crate::scripts::FLAG_BASE_ID)?;
+        Some((u64::from(relative / 8), (relative % 8) as u8))
+    }
+
+    pub fn event_flag(&self, id: u32) -> Option<bool> {
+        let (offset, bit) = self.flag_spot(id)?;
+        let byte = self.flag_byte_at(offset)?;
+        Some((byte >> bit) & 1 == 1)
+    }
+
     pub fn set_flag_byte(&self, offset: u64, value: u8) -> Result<(), String> {
         let block = self
             .event_flag_block()
@@ -820,10 +744,29 @@ impl Game {
             .map_err(|err| format!("flag +{offset:#X}: {err}"))
     }
 
-    /// Set (or clear) one event flag through the game's own setter, with the
-    /// same arguments the table's `SetEventFlag` stub builds: manager in RCX, a
-    /// pointer to the id in RDX, the value in R8B.
     pub fn set_event_flag(&self, id: u32, on: bool) -> Result<(), String> {
+        let Some((offset, bit)) = self.flag_spot(id) else {
+            return self.set_flag_via_game(id, on);
+        };
+        let block = self
+            .event_flag_block()
+            .ok_or_else(|| "the event flag block is null — load a character first".to_string())?;
+        let at = block + offset;
+        let mut byte = self
+            .mem
+            .read_u8(at)
+            .map_err(|err| format!("flag {id}: {err}"))?;
+        if on {
+            byte |= 1 << bit;
+        } else {
+            byte &= !(1 << bit);
+        }
+        self.mem
+            .write_u8(at, byte)
+            .map_err(|err| format!("flag {id}: {err}"))
+    }
+
+    pub fn set_flag_via_game(&self, id: u32, on: bool) -> Result<(), String> {
         let setter = self
             .event_flag_setter()
             .ok_or_else(|| "the event flag setter was not found in this build".to_string())?;
@@ -837,14 +780,6 @@ impl Game {
         Ok(())
     }
 
-    /// Walk one of the game's param lists and collect the event flag id of every
-    /// row, mirroring the table's unlock loops: the list head is reached through
-    /// `[PARAM_PTR]` → `+list` → `+0x80` → `+0x80`, rows start at `+0x40` with a
-    /// stride of `0x18`, and each row holds its flag either at `+0` or behind the
-    /// offset stored at `+8` (flag at that target `+4`).
-
-    /// `(symbol, resolved address)` for diagnostics; `None` means the AOB scan
-    /// did not find the signature in this build of the game.
     pub fn symbols_report(&self) -> Vec<(&'static str, Option<u64>)> {
         offsets::SYMBOLS
             .iter()

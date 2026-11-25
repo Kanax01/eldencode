@@ -2209,75 +2209,75 @@ ashes	ash	422000	1	1
 ashes	ash	505000	1	1
 ashes	ash	548000	1	1
 ashes	ash	800000	1	1
-arrows	goods	50000000	99	0
-arrows	goods	50010000	99	0
-arrows	goods	50020000	99	0
-arrows	goods	50030000	99	0
-arrows	goods	50040000	99	0
-arrows	goods	50060000	99	0
-arrows	goods	50080000	99	0
-arrows	goods	50090000	99	0
-arrows	goods	50100000	99	0
-arrows	goods	50110000	99	0
-arrows	goods	50130000	99	0
-arrows	goods	50140000	99	0
-arrows	goods	50150000	99	0
-arrows	goods	50160000	99	0
-arrows	goods	50170000	99	0
-arrows	goods	50180000	99	0
-arrows	goods	50190000	99	0
-arrows	goods	50200000	99	0
-arrows	goods	50210000	99	0
-arrows	goods	50220000	99	0
-arrows	goods	50230000	99	0
-arrows	goods	50240000	99	0
-arrows	goods	50250000	99	0
-arrows	goods	50260000	99	0
-arrows	goods	50270000	99	0
-arrows	goods	50280000	99	0
-arrows	goods	50290000	99	0
-arrows	goods	50300000	99	0
-arrows	goods	50310000	99	0
-arrows	goods	50320000	99	0
-arrows	goods	50330000	99	0
-arrows	goods	50340000	99	0
-arrows	goods	50350000	99	0
-arrows	goods	51000000	99	0
-arrows	goods	51010000	99	0
-arrows	goods	51020000	99	0
-arrows	goods	51030000	99	0
-arrows	goods	51040000	99	0
-arrows	goods	51050000	99	0
-arrows	goods	51060000	99	0
-arrows	goods	52000000	99	0
-arrows	goods	52010000	99	0
-arrows	goods	52020000	99	0
-arrows	goods	52030000	99	0
-arrows	goods	52040000	99	0
-arrows	goods	52050000	99	0
-arrows	goods	52060000	99	0
-arrows	goods	52070000	99	0
-arrows	goods	52080000	99	0
-arrows	goods	52090000	99	0
-arrows	goods	52100000	99	0
-arrows	goods	52110000	99	0
-arrows	goods	52120000	99	0
-arrows	goods	52130000	99	0
-arrows	goods	52140000	99	0
-arrows	goods	52150000	99	0
-arrows	goods	52160000	99	0
-arrows	goods	52170000	99	0
-arrows	goods	52180000	99	0
-arrows	goods	52190000	99	0
-arrows	goods	53000000	99	0
-arrows	goods	53010000	99	0
-arrows	goods	53020000	99	0
-arrows	goods	53030000	99	0
-arrows	goods	50540000	99	1
-arrows	goods	50550000	99	1
-arrows	goods	51500000	99	1
-arrows	goods	52520000	99	1
-arrows	goods	53500000	99	1
+arrows	weapon	50000000	99	0
+arrows	weapon	50010000	99	0
+arrows	weapon	50020000	99	0
+arrows	weapon	50030000	99	0
+arrows	weapon	50040000	99	0
+arrows	weapon	50060000	99	0
+arrows	weapon	50080000	99	0
+arrows	weapon	50090000	99	0
+arrows	weapon	50100000	99	0
+arrows	weapon	50110000	99	0
+arrows	weapon	50130000	99	0
+arrows	weapon	50140000	99	0
+arrows	weapon	50150000	99	0
+arrows	weapon	50160000	99	0
+arrows	weapon	50170000	99	0
+arrows	weapon	50180000	99	0
+arrows	weapon	50190000	99	0
+arrows	weapon	50200000	99	0
+arrows	weapon	50210000	99	0
+arrows	weapon	50220000	99	0
+arrows	weapon	50230000	99	0
+arrows	weapon	50240000	99	0
+arrows	weapon	50250000	99	0
+arrows	weapon	50260000	99	0
+arrows	weapon	50270000	99	0
+arrows	weapon	50280000	99	0
+arrows	weapon	50290000	99	0
+arrows	weapon	50300000	99	0
+arrows	weapon	50310000	99	0
+arrows	weapon	50320000	99	0
+arrows	weapon	50330000	99	0
+arrows	weapon	50340000	99	0
+arrows	weapon	50350000	99	0
+arrows	weapon	51000000	99	0
+arrows	weapon	51010000	99	0
+arrows	weapon	51020000	99	0
+arrows	weapon	51030000	99	0
+arrows	weapon	51040000	99	0
+arrows	weapon	51050000	99	0
+arrows	weapon	51060000	99	0
+arrows	weapon	52000000	99	0
+arrows	weapon	52010000	99	0
+arrows	weapon	52020000	99	0
+arrows	weapon	52030000	99	0
+arrows	weapon	52040000	99	0
+arrows	weapon	52050000	99	0
+arrows	weapon	52060000	99	0
+arrows	weapon	52070000	99	0
+arrows	weapon	52080000	99	0
+arrows	weapon	52090000	99	0
+arrows	weapon	52100000	99	0
+arrows	weapon	52110000	99	0
+arrows	weapon	52120000	99	0
+arrows	weapon	52130000	99	0
+arrows	weapon	52140000	99	0
+arrows	weapon	52150000	99	0
+arrows	weapon	52160000	99	0
+arrows	weapon	52170000	99	0
+arrows	weapon	52180000	99	0
+arrows	weapon	52190000	99	0
+arrows	weapon	53000000	99	0
+arrows	weapon	53010000	99	0
+arrows	weapon	53020000	99	0
+arrows	weapon	53030000	99	0
+arrows	weapon	50540000	99	1
+arrows	weapon	50550000	99	1
+arrows	weapon	51500000	99	1
+arrows	weapon	52520000	99	1
+arrows	weapon	53500000	99	1
 consumables	goods	190	99	0
 consumables	goods	810	99	0
 consumables	goods	811	99	0
@@ -2634,3 +2634,63 @@ physick	goods	11024	1
 physick	goods	11027	1
 physick	goods	2011060	1	1
 perfume	goods	9510	10
+summons	goods	203000	1
+summons	goods	205000	1
+summons	goods	207000	1
+summons	goods	208000	1
+summons	goods	209000	1
+summons	goods	210000	1
+summons	goods	211000	1
+summons	goods	212000	1
+summons	goods	213000	1
+summons	goods	214000	1
+summons	goods	215000	1
+summons	goods	218000	1
+summons	goods	219000	1
+summons	goods	220000	1
+summons	goods	222000	1
+summons	goods	224000	1
+summons	goods	225000	1
+summons	goods	226000	1
+summons	goods	227000	1
+summons	goods	229000	1
+summons	goods	230000	1
+summons	goods	231000	1
+summons	goods	232000	1
+summons	goods	233000	1
+summons	goods	234000	1
+summons	goods	235000	1
+summons	goods	236000	1
+summons	goods	237000	1
+summons	goods	240000	1
+summons	goods	241000	1
+summons	goods	242000	1
+summons	goods	243000	1
+summons	goods	244000	1
+summons	goods	245000	1
+summons	goods	246000	1
+summons	goods	248000	1
+summons	goods	249000	1
+summons	goods	250000	1
+summons	goods	251000	1
+summons	goods	252000	1
+summons	goods	253000	1
+summons	goods	254000	1
+summons	goods	255000	1
+summons	goods	8158	1
+great_runes	goods	191	1
+great_runes	goods	192	1
+great_runes	goods	193	1
+great_runes	goods	194	1
+great_runes	goods	195	1
+great_runes	goods	196	1
+great_runes	goods	10080	1
+great_runes	goods	8148	1
+great_runes	goods	8149	1
+great_runes	goods	8150	1
+great_runes	goods	8151	1
+great_runes	goods	8152	1
+great_runes	goods	8153	1
+great_runes	goods	190	99
+great_runes	goods	2008000	1	1
+great_runes	goods	135	1	1

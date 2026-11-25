@@ -327,7 +327,6 @@ pub fn runes(app: &App, f: &mut Frame, area: Rect) {
     widgets::lines_in(f, rows[1], panel("quick", &theme), lines, &theme, 0);
 }
 
-/// The upgrade sheet: enter on a weapon picks a level first.
 pub fn give_menu(app: &App, f: &mut Frame, area: Rect) {
     let Some(menu) = &app.give_menu else {
         return;
@@ -432,7 +431,6 @@ pub fn items(app: &App, f: &mut Frame, area: Rect) {
     ])
     .split(inner);
 
-    // Sub-tabs, one per item type; left/right switches them.
     let mut tabs: Vec<Span> = vec![Span::raw(" ")];
     for (i, kind) in Cat::ALL.iter().enumerate() {
         let active = i == app.items.cat;

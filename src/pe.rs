@@ -1,10 +1,4 @@
-//! Minimal PE32+ export lookup for a module as the loader mapped it into the
-//! game. Everything takes RVAs, so the same code works on the live image.
-//!
-//! We need it to reach the game's own `ntdll` exports — the table gets its
-//! item buffer from Windows, and so do we.
 
-/// Reads `len` bytes at an RVA.
 pub type Reader<'a> = dyn Fn(u64, usize) -> Option<Vec<u8>> + 'a;
 
 fn u16_at(read: &Reader, off: u64) -> Option<u16> {
@@ -17,8 +11,6 @@ fn u32_at(read: &Reader, off: u64) -> Option<u32> {
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-/// Absolute address of an exported name, or `None` when the module has no such
-/// export (or the entry is a forwarder, which must not be jumped to directly).
 pub fn find_export(read: &Reader, module_base: u64, name: &str) -> Option<u64> {
     if u16_at(read, 0)? != 0x5A4D {
         return None;
@@ -31,7 +23,7 @@ pub fn find_export(read: &Reader, module_base: u64, name: &str) -> Option<u64> {
     if u16_at(read, optional)? != 0x20B {
         return None;
     }
-    // DataDirectory[0] is the export table.
+
     let dirs = optional + 112;
     let export_rva = u32_at(read, dirs)? as u64;
     let export_size = u32_at(read, dirs + 4)? as u64;
@@ -73,9 +65,6 @@ pub fn find_export(read: &Reader, module_base: u64, name: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// A hand-built PE32+ image with one export named "Target" at RVA 0x2000
-    /// and one forwarder named "Forwarded" that resolves inside the export
-    /// table, which must be rejected.
     fn image() -> Vec<u8> {
         let mut buf = vec![0u8; 0x3000];
         buf[0..2].copy_from_slice(b"MZ");
@@ -91,22 +80,21 @@ mod tests {
         buf[dirs + 4..dirs + 8].copy_from_slice(&0x400u32.to_le_bytes());
 
         let dir = export_rva as usize;
-        buf[dir + 0x14..dir + 0x18].copy_from_slice(&2u32.to_le_bytes()); // functions
-        buf[dir + 0x18..dir + 0x1C].copy_from_slice(&2u32.to_le_bytes()); // names
-        buf[dir + 0x1C..dir + 0x20].copy_from_slice(&0x1200u32.to_le_bytes()); // functions[]
-        buf[dir + 0x20..dir + 0x24].copy_from_slice(&0x1220u32.to_le_bytes()); // names[]
-        buf[dir + 0x24..dir + 0x28].copy_from_slice(&0x1240u32.to_le_bytes()); // ordinals[]
+        buf[dir + 0x14..dir + 0x18].copy_from_slice(&2u32.to_le_bytes());
+        buf[dir + 0x18..dir + 0x1C].copy_from_slice(&2u32.to_le_bytes());
+        buf[dir + 0x1C..dir + 0x20].copy_from_slice(&0x1200u32.to_le_bytes());
+        buf[dir + 0x20..dir + 0x24].copy_from_slice(&0x1220u32.to_le_bytes());
+        buf[dir + 0x24..dir + 0x28].copy_from_slice(&0x1240u32.to_le_bytes());
 
-        // functions[]: "Target" then a forwarder that points inside the table
         buf[0x1200..0x1204].copy_from_slice(&0x2000u32.to_le_bytes());
         buf[0x1204..0x1208].copy_from_slice(&0x1000u32.to_le_bytes());
-        // names[] -> the strings
+
         buf[0x1220..0x1224].copy_from_slice(&0x1300u32.to_le_bytes());
         buf[0x1224..0x1228].copy_from_slice(&0x1310u32.to_le_bytes());
-        // ordinals[]
+
         buf[0x1240..0x1242].copy_from_slice(&0u16.to_le_bytes());
         buf[0x1242..0x1244].copy_from_slice(&1u16.to_le_bytes());
-        // strings
+
         buf[0x1300..0x1307].copy_from_slice(b"Target\0");
         buf[0x1310..0x131A].copy_from_slice(b"Forwarded\0");
         buf
@@ -137,4 +125,3 @@ mod tests {
         assert_eq!(find_export(&read, 0, "Target"), None);
     }
 }
-

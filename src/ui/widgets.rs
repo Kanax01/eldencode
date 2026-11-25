@@ -19,7 +19,6 @@ pub fn panel(title: &str, theme: &Theme) -> Block<'static> {
         .style(Style::default().bg(theme.panel))
 }
 
-/// Fill a panel with pre-built lines, clipped to its inner height.
 pub fn lines_in(
     f: &mut Frame,
     area: Rect,

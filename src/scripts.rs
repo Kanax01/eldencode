@@ -1,13 +1,3 @@
-//! Bulk scripts: "give everything" and the flag unlocks.
-//!
-//! Item scripts feed a list of ids to the same item routine the Items screen
-//! uses, one call per item. The id lists in `assets/scripts.tsv` are taken from
-//! the table's own bulk entries (base game and DLC lists merged, duplicates
-//! dropped), so a script here adds the same set its counterpart does.
-//!
-//! Flag scripts call the game's event-flag setter directly, which is how the
-//! table's `SetEventFlag` stub does it: `rcx` = event flag manager, `rdx` =
-//! pointer to the flag id, `r8b` = 1.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -15,7 +5,6 @@ use crate::items::{Cat, Catalog};
 
 pub const RAW: &str = include_str!("../assets/scripts.tsv");
 
-/// One item to hand to the game: category, id, quantity, upgrade level.
 pub type Give = (Cat, u32, u32, u32);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,6 +27,8 @@ pub enum List {
     Multiplayer,
     Physick,
     Perfume,
+    Summons,
+    GreatRunes,
 }
 
 impl List {
@@ -61,25 +52,27 @@ impl List {
             List::Multiplayer => "multiplayer",
             List::Physick => "physick",
             List::Perfume => "perfume",
+            List::Summons => "summons",
+            List::GreatRunes => "great_runes",
         }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// A list straight out of `assets/scripts.tsv`.
+
     List(List),
-    /// The spell list split by id: sorceries sit below 6000.
+
     Sorceries,
     Incantations,
-    /// Every rune item in the catalog, one stack each.
+
     Runes,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
     Every,
-    /// One entry per family: the highest `+N` variant.
+
     TopOnly,
 }
 
@@ -89,34 +82,46 @@ pub enum Kind {
         source: Source,
         variant: Variant,
     },
-    /// Set every grace flag ("bonfire" param list).
+
     UnlockGraces,
-    /// Set every summoning-pool sign flag.
+
     SummoningPools,
-    /// The table's boss list, written a byte at a time: `0xFF` marks the boss
-    /// dead, `0x00` brings it back.
+
     Bosses { dead: bool },
-    /// Torrent's unlock flags plus the whistle item itself.
+
     UnlockTorrent,
-    /// Melina's invitation flags, which open Roundtable Hold.
+
     UnlockRoundtable,
-    /// The map display switches plus every map piece flag.
+
     RevealMaps,
-    /// Top both flasks up to fourteen charges.
+
     MaxFlaskNumber,
-    /// Take both flasks to +12.
+
     MaxFlaskCharge,
+
+    BellBearings,
+
+    MapMarkings,
 }
 
-/// The crafting kit's item and the flag that marks the crafting feature as
-/// unlocked; the material list is useless without them.
+const BEARING_BYTES: [u64; 8] = [
+    0x153A6D, 0x153A6E, 0x153A6F, 0x153A70, 0x153A71, 0x153A72, 0x153A73, 0x153A74,
+];
+
+pub fn bell_bearing_flags() -> Vec<u32> {
+    let mut flags = Vec::with_capacity(BEARING_BYTES.len() * 8);
+    for byte in BEARING_BYTES {
+        let first = FLAG_BASE_ID + (byte * 8) as u32;
+        flags.extend(first..=first + 7);
+    }
+    flags
+}
+
 pub const CRAFTING_KIT: u32 = 8_500;
 pub const CRAFTING_KIT_FLAG: u32 = 60_120;
 
 const CRAFTING_KIT_NEEDED: [(Cat, u32); 1] = [(Cat::Goods, CRAFTING_KIT)];
 
-/// Items a script assumes you already own, given first when the inventory has
-/// none.
 pub fn prerequisites(script: &Script) -> &'static [(Cat, u32)] {
     match script.kind {
         Kind::Items {
@@ -127,8 +132,6 @@ pub fn prerequisites(script: &Script) -> &'static [(Cat, u32)] {
     }
 }
 
-/// Byte offsets into `[[EventFlagMan]+0x28]`, taken from the table's
-/// "Revive/Kill ALL Bosses" entry.
 pub const BOSS_FLAGS: &str = include_str!("../assets/boss_flags.tsv");
 
 pub fn boss_flag_offsets() -> Vec<u64> {
@@ -138,24 +141,14 @@ pub fn boss_flag_offsets() -> Vec<u64> {
         .collect()
 }
 
-/// Torrent: 60100 is the horse feature unlock — without it the game refuses to
-/// summon him even with the whistle in the inventory — 4680 marks Melina's
-/// hand-off as done, and the other two are the companion flags the whistle
-/// normally sets alongside it.
 pub const TORRENT_FLAGS: [u32; 4] = [60_100, 4_680, 4_681, 710_520];
 
-/// The item the whistle itself lives in: goods 130, "Spectral Steed Whistle".
 pub const WHISTLE: (Cat, u32, u32, u32) = (Cat::Goods, 130, 1, 0);
 
-/// Roundtable Hold: Melina's invitation gate — the accord, the whistle hand-off
-/// and the "rested at a grace outside Limgrave" step that makes her offer it.
 pub const ROUNDTABLE_FLAGS: [u32; 5] = [4_680, 4_681, 3_062, 3_063, 3_064];
 
-/// The flags that actually unlock the cooking recipes. Handing over the cookbook
-/// items is only half of it: the recipe list is flag driven, which is why the
-/// books appeared in the inventory and nothing could be cooked. Taken from the
-/// table's own `Cookbook_Ids` list (59 entries, one typo and one repeat
-/// removed).
+pub const FLAG_BASE_ID: u32 = 50_000;
+
 pub const COOKBOOK_FLAGS: [u32; 58] = [
     67000, 67010, 67020, 67030, 67050, 67060, 67070, 67080, 67090, 67100,
     67110, 67120, 67130, 67200, 67210, 67220, 67230, 67250, 67260, 67270,
@@ -165,7 +158,6 @@ pub const COOKBOOK_FLAGS: [u32; 58] = [
     68020, 68030, 68200, 68210, 68220, 68230, 68400, 68410,
 ];
 
-/// Items that need flags set as well as the item itself.
 pub fn unlock_flags(script: &Script) -> &'static [u32] {
     match script.kind {
         Kind::Items {
@@ -176,10 +168,6 @@ pub fn unlock_flags(script: &Script) -> &'static [u32] {
     }
 }
 
-/// Grace flags. The table reads these out of `BonfireWarpParam`; the flag ids
-/// live in four ranges — 71xxx legacy dungeons, 72xxx the DLC, 73xxx caves and
-/// catacombs, 76xxx the open world — so the same set is written from the ranges.
-/// A flag that no grace uses is a spare byte and does nothing.
 pub fn grace_flags() -> Vec<u32> {
     let mut flags = Vec::with_capacity(4_000);
     for range in [
@@ -193,19 +181,27 @@ pub fn grace_flags() -> Vec<u32> {
     flags
 }
 
-/// Summoning pools: every martyr effigy flag lives in the 670xxx block.
 pub fn summoning_pool_flags() -> Vec<u32> {
     (670_000..=670_999).collect()
 }
 
-/// Map reveal, in two layers: first the display switches (overworld,
-/// underground, Shadow Realm), then every map piece flag — the same flags the
-/// map fragments set when the game hands them over, which is why the fragments
-/// alone can leave the map blank.
 pub fn map_reveal_flags() -> Vec<u32> {
     let mut flags = vec![62_000, 62_001, 62_002, 82_001, 82_002];
-    flags.extend(62_004..=62_012);
+    flags.extend(62_010..=62_012);
     flags.extend(62_020..=62_084);
+    flags
+}
+
+pub fn map_marking_flags() -> Vec<u32> {
+    let mut flags = vec![62_000, 62_001, 62_002, 82_001, 82_002];
+    for id in 62_010u32..=62_084 {
+        if matches!(id, 62_053 | 62_065) {
+            continue;
+        }
+        flags.push(id);
+    }
+    flags.extend(62_100u32..=62_799);
+    flags.extend(62_800u32..=62_999);
     flags
 }
 
@@ -220,7 +216,7 @@ pub struct Entry {
     pub cat: Cat,
     pub id: u32,
     pub qty: u32,
-    /// Comes from one of the DLC-only lists.
+
     pub dlc: bool,
 }
 
@@ -261,6 +257,8 @@ impl Library {
                 "multiplayer" => "multiplayer",
                 "physick" => "physick",
                 "perfume" => "perfume",
+                "summons" => "summons",
+                "great_runes" => "great_runes",
                 "magic" => "magic",
                 _ => continue,
             };
@@ -288,9 +286,6 @@ impl Library {
         self.lists.get(key).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Items for a script. `include_dlc` decides whether the DLC-only lists are
-    /// part of it — they are off by default because DLC ids are not in the item
-    /// params of the base game.
     pub fn resolve(&self, script: &Script, catalog: &Catalog, include_dlc: bool) -> Vec<Give> {
         let Kind::Items { source, variant } = script.kind else {
             return Vec::new();
@@ -303,8 +298,7 @@ impl Library {
                     .iter()
                     .filter(wanted)
                     .map(|entry| {
-                        // Weapon ids carry the upgrade level in the last two
-                        // digits, so the pre-maxed list needs no extra work.
+
                         let level = if entry.cat == Cat::Weapon {
                             entry.id % 100
                         } else {
@@ -339,16 +333,13 @@ impl Library {
                 .map(|item| (Cat::Goods, item.id, 99, 0))
                 .collect(),
         };
-        // One call per item. Two rows can name the same item (a variant listed
-        // twice, or two spellings of one id), and a bulk script must not add it
-        // twice; the id the game is called with is what decides.
+
         let mut seen: HashSet<u32> = HashSet::new();
         out.retain(|give| seen.insert(item_id(give)));
         out
     }
 }
 
-/// The id the game's item routine is called with, so duplicates collapse.
 fn item_id(give: &Give) -> u32 {
     let (cat, id, _qty, level) = *give;
     crate::items::gib_id(cat, id, level)
@@ -362,7 +353,6 @@ fn is_rune(name: &str) -> bool {
         || name.starts_with("Lord's Rune")
 }
 
-/// Keep only the strongest upgrade variant of each talisman family.
 fn top_variants(items: Vec<Give>, catalog: &Catalog) -> Vec<Give> {
     let mut best: BTreeMap<String, (u32, Give)> = BTreeMap::new();
     for give in items {
@@ -378,7 +368,6 @@ fn top_variants(items: Vec<Give>, catalog: &Catalog) -> Vec<Give> {
     best.into_values().map(|(_, give)| give).collect()
 }
 
-/// `"Erdtree's Favor +2"` → `("Erdtree's Favor", 2)`.
 fn split_variant(name: &str) -> (String, u32) {
     let trimmed = name.trim_end();
     if let Some(pos) = trimmed.rfind(" +") {
@@ -389,7 +378,7 @@ fn split_variant(name: &str) -> (String, u32) {
     (trimmed.to_string(), 0)
 }
 
-pub const SCRIPTS: [Script; 31] = [
+pub const SCRIPTS: [Script; 35] = [
     Script {
         name: "all weapons & shields",
         blurb: "every weapon and shield, base game and DLC, at +0",
@@ -584,6 +573,32 @@ pub const SCRIPTS: [Script; 31] = [
         kind: Kind::Bosses { dead: false },
     },
     Script {
+        name: "unlock all map markings",
+        blurb: "every dungeon, cave, catacomb, church, ruin and evergaol marking on the world map",
+        kind: Kind::MapMarkings,
+    },
+    Script {
+        name: "unlock all bell bearings",
+        blurb: "marks the Twin Maiden Husks as holding every merchant's bell bearing",
+        kind: Kind::BellBearings,
+    },
+    Script {
+        name: "unlock all great runes",
+        blurb: "every great rune, the restored copies that make them equippable, and 99 Rune Arcs",
+        kind: Kind::Items {
+            source: Source::List(List::GreatRunes),
+            variant: Variant::Every,
+        },
+    },
+    Script {
+        name: "unlock all spirit summons",
+        blurb: "every spirit ash plus the Spirit Calling Bell, one of each",
+        kind: Kind::Items {
+            source: Source::List(List::Summons),
+            variant: Variant::Every,
+        },
+    },
+    Script {
         name: "perfume bottles",
         blurb: "the ten empty perfume bottles the arts are refilled from",
         kind: Kind::Items {
@@ -617,7 +632,6 @@ pub const SCRIPTS: [Script; 31] = [
 mod tests {
     use super::*;
 
-    /// A bulk give must never hand the game the same item twice.
     #[test]
     fn every_script_gives_each_item_once() {
         let library = Library::load();

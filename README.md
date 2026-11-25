@@ -6,18 +6,6 @@ debug flags, adds any item to your inventory at the upgrade level you pick, and
 slots weapons, armour and talismans straight onto your character — all from a
 ratatui interface in your terminal.
 
-```
- ELDENCODE   elden ring mod menu · Proton aware
-╭──────────────────────────────────────────────────────────────────────────╮
-│ ▸1 Overview  2 Runes  3 Attributes  4 Vitals  5 Flags  6 Items  …        │
-╰──────────────────────────────────────────────────────────────────────────╯
-╭ session ─────────────────────────╮╭ tarnished ───────────────────────────╮
-│ ● attached  eldenring.exe        ││ Name        Melina                   │
-│ Process id      48213            ││ Level       137   runes 4200318      │
-│ Image base      0x140000000      ││ HP       ████████████░░░░  1450/1780 │
-│ Symbols         9/9 resolved     ││ FP       ██████████████░░   220/240  │
-╰──────────────────────────────────╯╰──────────────────────────────────────╯
-```
 
 ## What it does
 
@@ -251,6 +239,10 @@ params when the expansion is actually loaded.
 | all multiplayer items | fingers, effigies, ciphers, taunter's tongue and 99 remedies |
 | all wondrous physick items | the flask itself plus 18 crystal tears (19 with DLC) |
 | perfume bottles | the ten empty perfume bottles the perfume arts refill from |
+| unlock all great runes | every great rune, the restored copies that make them equippable, and 99 Rune Arcs so any of them can be switched on |
+| unlock all spirit summons | all 43 spirit ashes plus the Spirit Calling Bell |
+| unlock all map markings | every dungeon, cave, catacomb, church, ruin and evergaol marking on the world map |
+| unlock all bell bearings | marks the Twin Maiden Husks as already holding every bell bearing, so every merchant's stock is in their shop |
 | max out flask number | tops the two flask allocations up to the 14-charge cap |
 | max out flask charge | takes both flasks to +12 through the game's own tool swap |
 | money bags | 99 of every rune item: golden, hero's, numen's, lord's |
@@ -299,9 +291,15 @@ a base-game install fall over when they are added. Long runs mean thousands of p
 playable but expects a few seconds of hitching, and your inventory has finite
 room — anything over the cap is simply not added.
 
-The two block scripts work differently: they write the flag block directly,
-one byte per id, the same write the table's boss entries use, so a whole block
-lands in about a tenth of a second with no calls into the game. **Graces** covers
+The two block scripts write the flag block directly, so a whole block lands in
+about a tenth of a second with no calls into the game. The block is one **bit**
+per flag in an array that starts at flag `50000`, so a flag's address is
+`offset = (id - 50000) / 8`, `bit = id % 8`. That mapping is not documented
+anywhere in the table: it was measured here by toggling single flags through the
+game's own setter and diffing the block — `60110 → 1263`, `60120 → 1265`,
+`71000 → 2625`, `72000 → 2750`, `76100 → 3262`, `670100 → 77512`, all exact.
+`--flags` prints the block address and how many flags are set in each range, so
+the result can be checked without guessing. **Graces** covers
 the four ranges the game gives them — `71000`–`71999` legacy dungeons,
 `72000`–`72999` the DLC, `73000`–`73999` caves and catacombs, `76000`–`76999` the
 open world. **Summoning pools** covers the `670000`–`670999` block every martyr
@@ -320,7 +318,23 @@ is not worth guessing at an offset for.
 its own, the flags in the 67xxx/68xxx block do. The script sets the table's own
 `Cookbook_Ids` list (58 unique flags after dropping its one typo `#27310`, which
 belongs to the Armorer's `67310` row, and one repeat) before handing over the
-books, so the recipes are cookable straight away.
+books, so the recipes are cookable straight away. The recipe flags go through
+the game's own setter rather than a raw bit write: the setter is what makes the
+crafting menu pick the unlock up, the bit on its own is not enough. The bulk
+range scripts (graces, pools) do use the raw bit write, which is fast and works
+for those.
+
+Map markings are the `62xxx` band of the save-format spec: `62010`-`62084` for
+the overworld, `62100`-`62799` for dungeon maps, `62800`-`62999` for DLC
+dungeons, plus the five display switches. The spec marks `62004`-`62009`,
+`62053` and `62065` as sub-regions the renderer cannot draw on their own (they
+leave black tiles), so both the marking script and the map-fragment script skip
+them.
+
+Bell bearings are the one script that must write bits directly no matter what:
+their flags sit at `base + 0x153A6D*8`, far past the range the game's setter
+accepts, and it silently ignores ids that high. The table solves it the same
+way, writing eight bytes of `0xFF` there.
 
 The single-flag scripts (Torrent, Roundtable, maps) call the game's own setter,
 found by the table's `EventFlag_C1` pattern rather than by the exported symbol,

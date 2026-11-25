@@ -68,7 +68,6 @@ impl Tab {
         Tab::ALL[(self.index() + Tab::ALL.len() - 1) % Tab::ALL.len()]
     }
 
-    /// Rows the cursor can sit on for this screen.
     pub fn rows(self) -> usize {
         match self {
             Tab::Runes => offsets::RUNES.len(),
@@ -106,9 +105,8 @@ pub struct Edit {
     pub cursor: usize,
 }
 
-/// The upgrade sheet: pick a level for a weapon, then give it.
 pub struct GiveMenu {
-    /// Weapon family id, without the level.
+
     pub family: u32,
     pub name: String,
     pub level: u32,
@@ -118,7 +116,7 @@ pub struct GiveMenu {
 }
 
 impl GiveMenu {
-    /// The id the game wants, before the level is added.
+
     pub fn id(&self) -> u32 {
         self.family
     }
@@ -130,7 +128,7 @@ pub struct ItemsView {
     pub sel: usize,
     pub scroll: usize,
     pub slot: usize,
-    /// Upgrade level added to the item id when giving a weapon.
+
     pub level: u32,
     pub qty: u32,
     pub filtered: Vec<usize>,
@@ -138,10 +136,9 @@ pub struct ItemsView {
 
 pub struct ScriptsView {
     pub sel: usize,
-    /// Include the DLC-only item lists in scripts. Off by default: DLC ids are
-    /// not in the base game's item params.
+
     pub include_dlc: bool,
-    /// Script waiting for a second enter press.
+
     pub pending: Option<usize>,
     pub progress: Option<Progress>,
     pub last: Option<(String, bool)>,
@@ -154,7 +151,7 @@ pub struct Progress {
 }
 
 pub struct App {
-    /// Open the weapon upgrade menu, if any.
+
     pub give_menu: Option<GiveMenu>,
     pub paths: Paths,
     pub cfg: Config,
@@ -184,7 +181,6 @@ pub struct App {
     pub help_scroll: usize,
 }
 
-/// The fields a screen lists, in display order.
 pub fn screen_fields(tab: Tab) -> Vec<&'static Field> {
     match tab {
         Tab::Runes => offsets::RUNES.iter().collect(),
@@ -311,8 +307,6 @@ impl App {
         Ok(())
     }
 
-    // ---------------------------------------------------------------- state
-
     pub fn attached(&self) -> bool {
         self.game.is_some()
     }
@@ -340,7 +334,6 @@ impl App {
         }
     }
 
-    /// Which catalog the selected slot draws from.
     pub fn slot_cat(&self) -> Cat {
         match self.current_slot().key {
             "helmet" | "chest" | "gauntlets" | "legs" => Cat::Armor,
@@ -397,14 +390,11 @@ impl App {
         self.catalog.items.get(idx)
     }
 
-    /// Highest upgrade level for the highlighted item.
     pub fn selected_max_level(&self) -> u32 {
         self.selected_item()
             .map(|item| self.catalog.max_level(item.id))
             .unwrap_or(0)
     }
-
-    // --------------------------------------------------------------- attach
 
     pub fn attach(&mut self) {
         self.eac = process::anti_cheat_running();
@@ -511,8 +501,6 @@ impl App {
             }
         }
     }
-
-    // ---------------------------------------------------------------- input
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
@@ -808,7 +796,10 @@ impl App {
                 self.items.qty = self.items.qty.saturating_sub(1).max(1);
             }
             KeyCode::Char('.') => {
-                let cap = crate::items::max_stack(Cat::ALL[self.items.cat]);
+                let cap = crate::items::max_stack(
+                    Cat::ALL[self.items.cat],
+                    self.selected_item().map(|item| item.id).unwrap_or(0),
+                );
                 self.items.qty = (self.items.qty + 1).min(cap);
             }
             KeyCode::Enter => {
@@ -823,14 +814,14 @@ impl App {
         }
     }
 
-    /// Keep the chosen quantity inside the limit of the category on screen.
     fn clamp_qty(&mut self) {
-        let cap = crate::items::max_stack(Cat::ALL[self.items.cat]);
+        let cap = crate::items::max_stack(
+            Cat::ALL[self.items.cat],
+            self.selected_item().map(|item| item.id).unwrap_or(0),
+        );
         self.items.qty = self.items.qty.clamp(1, cap);
     }
 
-    /// Give the highlighted item to the inventory, with the chosen level and
-    /// quantity, through the game's own item routine.
     fn give_selected(&mut self) {
         let Some(item) = self.selected_item().cloned() else {
             return;
@@ -860,8 +851,6 @@ impl App {
         }
     }
 
-    /// Enter on a weapon: pick the upgrade level first. The level is the last
-    /// two digits of the id the game uses, so it is arithmetic on the family id.
     fn open_give_menu(&mut self) {
         let Some(item) = self.selected_item().cloned() else {
             return;
@@ -914,7 +903,6 @@ impl App {
         }
     }
 
-    /// Give one item, reporting the id the game actually received.
     fn give_with(&mut self, cat: Cat, id: u32, qty: u32, level: u32) {
         let name = self
             .catalog
@@ -987,8 +975,6 @@ impl App {
         }
     }
 
-    /// Run a bulk script: one call per item or per flag, redrawing every few
-    /// steps so the progress bar moves and esc (or q) can stop it.
     fn execute_script(&mut self, index: usize, terminal: &mut Tui) -> std::io::Result<()> {
         let Some(script) = SCRIPTS.get(index) else {
             return Ok(());
@@ -1010,13 +996,20 @@ impl App {
                 if let Some(note) = self.ensure_crafting_kit(script) {
                     label.push_str(&format!(" — {note}"));
                 }
-                // Cookbooks are the same story as maps: the item on its own does
-                // not unlock the recipes, the flags do.
+
                 let recipes = crate::scripts::unlock_flags(script);
                 if !recipes.is_empty() {
-                    self.run_flag_bytes(terminal, &format!("{label} recipes"), recipes)?;
+                    self.run_flag_list(terminal, &format!("{label} recipes"), recipes)?;
                 }
                 self.run_gives(terminal, &label, gives)
+            }
+            ScriptKind::MapMarkings => {
+                let flags = crate::scripts::map_marking_flags();
+                self.run_flag_bytes(terminal, script.name, &flags)
+            }
+            ScriptKind::BellBearings => {
+                let flags = crate::scripts::bell_bearing_flags();
+                self.run_flag_bytes(terminal, script.name, &flags)
             }
             ScriptKind::MaxFlaskNumber => self.run_max_flask_number(),
             ScriptKind::MaxFlaskCharge => self.run_max_flask_charge(),
@@ -1086,16 +1079,13 @@ impl App {
                     } else {
                         given += 1;
                     }
-                    // The game rebuilds its inventory on the main thread after
-                    // each item, so leave room between calls and a longer beat
-                    // every so often rather than hammering a whole list.
+
                     std::thread::sleep(Duration::from_millis(25));
                     if given % 20 == 0 {
                         std::thread::sleep(Duration::from_millis(250));
                     }
                 }
-                // The game has no row for this id, so nothing was sent: count
-                // it and keep going instead of abandoning the whole list.
+
                 Some(Err(err)) if err.contains("no item param") => {
                     skipped += 1;
                 }
@@ -1150,9 +1140,6 @@ impl App {
         Ok(())
     }
 
-    /// Set a block of flag bytes straight into the flag block, the way the
-    /// table's boss entries do. One byte per flag id, no calls into the game, so
-    /// four thousand flags take well under a second.
     fn run_flag_bytes(
         &mut self,
         terminal: &mut Tui,
@@ -1170,7 +1157,7 @@ impl App {
         let mut failure: Option<String> = None;
         for (i, flag) in flags.iter().enumerate() {
             let outcome = match self.game.as_ref() {
-                Some(game) => Some(game.set_flag_byte(u64::from(*flag), 1)),
+                Some(game) => Some(game.set_flag_via_game(*flag, true)),
                 None => None,
             };
             match outcome {
@@ -1223,9 +1210,6 @@ impl App {
         Ok(())
     }
 
-    /// The material list is useless without the crafting kit, and the game
-    /// marks the crafting feature with flag 60120, so that flag is the check:
-    /// when it is off the kit is handed over first.
     fn ensure_crafting_kit(&mut self, script: &crate::scripts::Script) -> Option<String> {
         if crate::scripts::prerequisites(script).is_empty() {
             return None;
@@ -1233,9 +1217,8 @@ impl App {
         let owned = self
             .game
             .as_ref()
-            .and_then(|game| game.event_flag_byte(crate::scripts::CRAFTING_KIT_FLAG))
-            .unwrap_or(0)
-            != 0;
+            .and_then(|game| game.event_flag(crate::scripts::CRAFTING_KIT_FLAG))
+            .unwrap_or(false);
         if owned {
             return Some("crafting kit already owned".to_string());
         }
@@ -1249,7 +1232,6 @@ impl App {
         }
     }
 
-    /// Top both flasks up to fourteen charges.
     fn run_max_flask_number(&mut self) -> std::io::Result<()> {
         let outcome = match self.game.as_ref() {
             Some(game) => game.max_flask_charges(),
@@ -1273,7 +1255,6 @@ impl App {
         Ok(())
     }
 
-    /// Take both flasks to +12 through the game's own routines.
     fn run_max_flask_charge(&mut self) -> std::io::Result<()> {
         self.scripts.progress = Some(Progress {
             done: 0,
@@ -1304,7 +1285,6 @@ impl App {
         Ok(())
     }
 
-    /// Set a fixed list of event flags through the game's own setter.
     fn run_flag_list(
         &mut self,
         terminal: &mut Tui,
@@ -1378,8 +1358,6 @@ impl App {
         Ok(())
     }
 
-    /// Write the table's boss list one byte at a time: `0xFF` kills, `0x00`
-    /// revives. Memory writes only — no code runs in the game for this.
     fn run_boss_flags(
         &mut self,
         terminal: &mut Tui,
@@ -1458,8 +1436,6 @@ impl App {
         Ok(())
     }
 
-    /// Torrent needs both halves: the flags that say the whistle is ours, and
-    /// the whistle item itself.
     fn run_unlock_torrent(&mut self, terminal: &mut Tui, label: &str) -> std::io::Result<()> {
         let flags = crate::scripts::TORRENT_FLAGS;
         self.run_flag_list(terminal, label, &flags)?;

@@ -1,31 +1,21 @@
-//! Symbols, pointer chains and field offsets taken from the Hexinton
-//! "All in One 8.0.4" Cheat Engine table. Each symbol is a rip-relative access
-//! to a global; the table resolves it with an AOB scan and then treats the
-//! resulting address as the head of a pointer chain, exactly like
-//! `[GameDataMan]+8` + `0x6C` in Cheat Engine.
 
-/// Table these offsets came from; bumped when the game patches.
 pub const TABLE: &str = "game 1.17.1";
 
-/// `define(LocalPlayerOffset,10EF8)` from the table's enable script.
 pub const LOCAL_PLAYER_OFFSET: u64 = 0x10EF8;
-/// `define(CHRSP,1E640)`.
+
 pub const CHR_SP: u64 = 0x1E640;
 
 pub struct SymbolDef {
     pub name: &'static str,
     pub pattern: &'static str,
-    /// Byte index of the 4-byte rip displacement inside the match.
+
     pub offset: i32,
-    /// Bytes from the displacement to the end of the instruction (+4) plus any
-    /// extra the table adds.
+
     pub additional: i64,
-    /// True when the symbol *is* the matched address (a function entry or a
-    /// code position), not a rip-relative global.
+
     pub direct: bool,
 }
 
-/// `48 8B 05/0D/3D` style: displacement starts at byte 3 of the match.
 const fn sym(name: &'static str, pattern: &'static str, additional: i64) -> SymbolDef {
     SymbolDef {
         name,
@@ -36,7 +26,6 @@ const fn sym(name: &'static str, pattern: &'static str, additional: i64) -> Symb
     }
 }
 
-/// `80 3D` (cmp byte [rip+disp], imm8): the displacement starts at byte 2.
 const fn sym_cmp(name: &'static str, pattern: &'static str, additional: i64) -> SymbolDef {
     SymbolDef {
         name,
@@ -47,7 +36,6 @@ const fn sym_cmp(name: &'static str, pattern: &'static str, additional: i64) -> 
     }
 }
 
-/// `aobscanmodule` result used as-is: a function entry or code position.
 const fn code(name: &'static str, pattern: &'static str) -> SymbolDef {
     SymbolDef {
         name,
@@ -58,8 +46,6 @@ const fn code(name: &'static str, pattern: &'static str) -> SymbolDef {
     }
 }
 
-/// The subset of the table's `aobList` eldencode uses. The rest of the list is
-/// kept out on purpose: every entry costs a full module scan on attach.
 pub const SYMBOLS: &[SymbolDef] = &[
     sym(
         "WorldChrMan",
@@ -91,8 +77,7 @@ pub const SYMBOLS: &[SymbolDef] = &[
         "48 8B 05 ?? ?? ?? ?? 41 83 FF 02 ?? ?? 48 85 C0",
         7,
     ),
-    // Item spawning, straight from the table's InventoryAccessor / AddItemFunc
-    // scans. Both are code positions, so they are used without a fixup.
+
     code(
         "InventoryAccessor",
         "44 8B 61 1C 41 8B FC C1 EF 07 40 80 E7 01 41 C1 EC 08 41 80 E4 01 48 8B 0D",
@@ -107,10 +92,6 @@ pub const SYMBOLS: &[SymbolDef] = &[
     ),
 ];
 
-/// Image-relative pointer to the param repository. The flag walks read it, then
-
-/// From the table's itemgib stub: `mov rax, InventoryAccessor+19; mov eax,[rax];
-/// cdqe; mov rcx, InventoryAccessor+1D; add rcx, rax; mov rcx,[rcx]`.
 pub const INVENTORY_DISP: u64 = 0x19;
 pub const INVENTORY_SLOT: u64 = 0x1D;
 
@@ -119,7 +100,7 @@ pub enum Kind {
     U8,
     U32,
     F32,
-    /// UTF-16LE name string, read-only.
+
     Name,
 }
 
@@ -128,8 +109,7 @@ pub struct Field {
     pub key: &'static str,
     pub label: &'static str,
     pub symbol: &'static str,
-    /// Cheat Engine offset list, in table order. The last entry is applied
-    /// first (see `Game::resolve`).
+
     pub offsets: &'static [&'static str],
     pub addend: i64,
     pub kind: Kind,
@@ -155,8 +135,6 @@ const fn f(
     }
 }
 
-/// Resolve a single Cheat Engine offset token: hex, a `index*stride` form, or a
-/// table symbol that expands to a constant.
 pub fn parse_offset(token: &str) -> Option<i64> {
     let token = token.trim();
     match token {
@@ -278,8 +256,6 @@ pub const RUNES: &[Field] = &[
     ),
 ];
 
-/// Live values. The table reads these through
-/// `WorldChrMan -> LocalPlayerOffset -> 0*10 -> 190 -> 0 -> <off>`.
 pub const VITALS: &[Field] = &[
     Field {
         key: "hp",
@@ -346,7 +322,6 @@ pub const VITALS: &[Field] = &[
     },
 ];
 
-/// Saved-character counters (single dereference off `GameDataMan`).
 pub const SAVE_STATUS: &[Field] = &[
     f("deaths", "Deaths", "GameDataMan", &["94"], Kind::U32, ""),
     f(
@@ -375,8 +350,6 @@ pub const SAVE_STATUS: &[Field] = &[
     ),
 ];
 
-/// Debug flag block: `CHR_DBG_FLAGS + n`, one byte per flag, as in the table's
-/// `[ Character Data ] > ChrDbg` section.
 const fn flag(key: &'static str, label: &'static str, addend: i64, note: &'static str) -> Field {
     Field {
         key,
@@ -449,8 +422,6 @@ pub const FLAGS: &[Field] = &[
     flag("omission_mode", "All Omission Mode", 0x28, ""),
 ];
 
-/// Per-character flags that live on the player's ChrIns rather than the debug
-/// block. Same chain shape as the vitals.
 pub const PLAYER_FLAGS: &[Field] = &[
     Field {
         key: "no_gravity",
@@ -472,20 +443,9 @@ pub const PLAYER_FLAGS: &[Field] = &[
     },
 ];
 
-/// Slots the game uses for "nothing equipped". Weapon slots fall back to
-/// `110000` (Unarmed), armour and ammo to `0xFFFFFFFF`.
 pub const EMPTY_SLOT: u32 = 0xFFFF_FFFF;
 pub const UNARMED: u32 = 110_000;
 
-/// Equipment slots on the player's ChrAsm. Writing an item id here swaps what
-/// the character is holding/wearing without needing the item in the inventory.
-///
-/// The armour, ammo and talisman offsets are 4 bytes lower than the table's
-/// ChrAsm block: read against a live 1.17.1 character, `3CC`/`3D0`/`3D4` hold
-/// chest/gauntlets/legs and `3B0`/`3B4` hold arrows/bolts (the table lists
-/// helmet/talisman 1 and arrow at `3CC`/`3E0`/`3B4`). Weapon slots match the
-/// table exactly, and the third right-hand slot is omitted because that address
-/// is the arrow slot on this build.
 pub const EQUIP: &[Field] = &[
     f(
         "right_hand_1",
@@ -617,7 +577,6 @@ pub const EQUIP: &[Field] = &[
     ),
 ];
 
-/// Every field eldencode can read/write, for the overview snapshot.
 pub fn all_fields() -> impl Iterator<Item = &'static Field> {
     ATTRIBUTES
         .iter()

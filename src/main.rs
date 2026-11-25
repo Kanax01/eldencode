@@ -35,6 +35,7 @@ struct Cli {
     script: Option<String>,
     dlc: bool,
     params: bool,
+    flags: bool,
     limit: Option<usize>,
     skip: usize,
     qty: u32,
@@ -87,6 +88,10 @@ fn main() {
         print_params(&cfg);
         return;
     }
+    if cli.flags {
+        print_flags(&cfg);
+        return;
+    }
     if let Some(name) = &cli.script {
         print_script(&cfg, name, cli.skip, cli.limit, cli.dlc);
         return;
@@ -137,8 +142,50 @@ fn print_scan(cfg: &Config) {
     }
 }
 
-/// Show the param tables found in the running game and check ids against them.
-/// This only reads: nothing is called inside the game.
+fn print_flags(cfg: &Config) {
+    let Some(proc) = process::scan(&cfg.process).into_iter().next() else {
+        eprintln!("no process matches '{}'", cfg.process);
+        std::process::exit(1);
+    };
+    let game = match game::Game::attach(proc) {
+        Ok(game) => game,
+        Err(err) => {
+            eprintln!("attach failed: {}", err.message);
+            std::process::exit(1);
+        }
+    };
+    let Some(block) = game.event_flag_block() else {
+        eprintln!("the event flag block is null — load a character first");
+        std::process::exit(1);
+    };
+    println!("flag block at {block:#X}");
+    for id in [60100u32, 60120, 71000, 76100, 670000] {
+        match game.event_flag(id) {
+            Some(on) => println!("  flag {id}: {}", if on { "on" } else { "off" }),
+            None => println!("  flag {id}: below the block's first id"),
+        }
+    }
+    let graces = (71_000u32..=76_999)
+        .filter(|id| game.event_flag(*id).unwrap_or(false))
+        .count();
+    let pools = (670_000u32..=670_999)
+        .filter(|id| game.event_flag(*id).unwrap_or(false))
+        .count();
+    let recipes = (67_000u32..=68_999)
+        .filter(|id| game.event_flag(*id).unwrap_or(false))
+        .count();
+    let bearings = scripts::bell_bearing_flags()
+        .iter()
+        .filter(|id| game.event_flag(**id).unwrap_or(false))
+        .count();
+    let markings = scripts::map_marking_flags()
+        .iter()
+        .filter(|id| game.event_flag(**id).unwrap_or(false))
+        .count();
+    let markings_total = scripts::map_marking_flags().len();
+    println!("  set flags: graces {graces}/6000, pools {pools}/1000, 67xxx-68xxx {recipes}/2000, bearings {bearings}/64, markings {markings}/{markings_total}");
+}
+
 fn print_params(cfg: &Config) {
     let Some(proc) = process::scan(&cfg.process).into_iter().next() else {
         println!("no process matches '{}'", cfg.process);
@@ -236,8 +283,7 @@ fn print_probe(cfg: &Config) {
             Err(err) => println!("  {:<18} error: {err}", field.key),
         }
     }
-    // Write check: every writable field is rewritten with the value it already
-    // holds, so write access is exercised without changing the save.
+
     let mut written = 0;
     let mut write_error = None;
     for field in offsets::RUNES.iter().chain(offsets::EQUIP.iter()) {
@@ -283,8 +329,6 @@ fn print_probe(cfg: &Config) {
     }
 }
 
-/// `--script`: run a bulk script without the UI, one line per item, stopping at
-/// the first failure. `--skip` and `--limit` cut the list down for testing.
 fn print_script(
     cfg: &Config,
     name: &str,
@@ -326,18 +370,16 @@ fn print_script(
             let gives = library.resolve(script, &catalog, include_dlc);
             let total = gives.len();
             println!("DLC items: {}", if include_dlc { "on" } else { "off" });
-            // Cookbook items do not unlock their recipes by themselves.
+
             let recipes = scripts::unlock_flags(script);
             if !recipes.is_empty() {
-                run_flag_bytes(&game, "cookbook recipes", recipes, 0, None);
+                run_flag_calls(&game, "cookbook recipes", recipes);
             }
-            // The material list needs the crafting kit; the game marks the
-            // crafting feature with flag 60120, so that flag is the check.
+
             if !scripts::prerequisites(script).is_empty() {
                 let owned = game
-                    .event_flag_byte(scripts::CRAFTING_KIT_FLAG)
-                    .unwrap_or(0)
-                    != 0;
+                    .event_flag(scripts::CRAFTING_KIT_FLAG)
+                    .unwrap_or(false);
                 if owned {
                     println!("crafting kit: already owned");
                 } else {
@@ -371,17 +413,13 @@ fn print_script(
                     Ok(returned) => {
                         println!("ok {returned:#X}");
                         given += 1;
-                        // The game rebuilds its inventory on the main thread after
-                        // each item; give it room, and a longer beat every so
-                        // often, instead of hammering it for a whole list.
+
                         std::thread::sleep(std::time::Duration::from_millis(25));
                         if given % 20 == 0 {
                             std::thread::sleep(std::time::Duration::from_millis(250));
                         }
                     }
-                    // A stale id in the table's list is not a reason to stop a
-                    // bulk give: the game has no param row for it, nothing was
-                    // sent, and the rest of the list is still good.
+
                     Err(err) if err.contains("no item param") => {
                         println!("skipped (no param row)");
                         absent += 1;
@@ -429,6 +467,14 @@ fn print_script(
             let flags = scripts::map_reveal_flags();
             run_flag_list(&game, "maps", &flags, skip, limit)
         }
+        scripts::Kind::MapMarkings => {
+            let flags = scripts::map_marking_flags();
+            run_flag_bytes(&game, "map markings", &flags, skip, limit);
+        }
+        scripts::Kind::BellBearings => {
+            let flags = scripts::bell_bearing_flags();
+            run_flag_bytes(&game, "bell bearings", &flags, 0, None);
+        }
         scripts::Kind::MaxFlaskNumber => match game.max_flask_charges() {
             Ok((hp, mp)) => println!(
                 "flasks: {hp} crimson + {mp} cerulean = {} charges — rest at a grace to refresh",
@@ -455,7 +501,6 @@ fn print_script(
     }
 }
 
-/// Set a fixed list of event flags through the game's own setter.
 fn run_flag_list(
     game: &game::Game,
     label: &str,
@@ -490,7 +535,6 @@ fn run_flag_list(
     println!("done: {set} flags set, {failed} failed");
 }
 
-/// Write the table's boss list a byte at a time, like its kill/revive entries.
 fn run_boss_flags(game: &game::Game, label: &str, dead: bool, skip: usize, limit: Option<usize>) {
     let offsets = scripts::boss_flag_offsets();
     let value = if dead { 0xFF } else { 0x00 };
@@ -517,6 +561,23 @@ fn run_boss_flags(game: &game::Game, label: &str, dead: bool, skip: usize, limit
     println!("done: {written} written, {failed} failed — reload the area for it to show");
 }
 
+fn run_flag_calls(game: &game::Game, label: &str, flags: &[u32]) {
+    println!("{label}: {} flags", flags.len());
+    let mut set = 0usize;
+    let mut failed = 0usize;
+    for flag in flags {
+        match game.set_flag_via_game(*flag, true) {
+            Ok(()) => set += 1,
+            Err(err) => {
+                println!("  flag {flag} FAILED: {err}");
+                failed += 1;
+                break;
+            }
+        }
+    }
+    println!("done: {set} flags set, {failed} failed");
+}
+
 fn run_flag_bytes(
     game: &game::Game,
     label: &str,
@@ -535,7 +596,7 @@ fn run_flag_bytes(
         if set >= take {
             break;
         }
-        match game.set_flag_byte(u64::from(*flag), 1) {
+        match game.set_event_flag(*flag, true) {
             Ok(()) => set += 1,
             Err(err) => {
                 println!("  [{index}] flag {flag} FAILED: {err}");
@@ -547,8 +608,6 @@ fn run_flag_bytes(
     println!("done: {set} flags set, {failed} failed");
 }
 
-/// `--give`: add an item to the inventory from the command line, the same path
-/// the Items screen uses.
 fn print_give(cfg: &Config, id: u32, qty: u32, level: u32) {
     let catalog = items::Catalog::load();
     let found = catalog
@@ -638,6 +697,7 @@ fn parse_cli() -> Result<Cli, String> {
         script: None,
         dlc: false,
         params: false,
+        flags: false,
         limit: None,
         skip: 0,
         qty: 1,
@@ -671,6 +731,7 @@ fn parse_cli() -> Result<Cli, String> {
             }
             "--dlc" => cli.dlc = true,
             "--params" => cli.params = true,
+            "--flags" => cli.flags = true,
             "--script" => {
                 cli.script = Some(args.next().ok_or("--script needs a script name")?);
             }

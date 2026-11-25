@@ -108,7 +108,7 @@ fn header(app: &App, f: &mut Frame, area: Rect) {
         },
         app.mode_label()
     );
-    // " ● " + status + " " so the badge and the pid are never clipped.
+
     let right_w = (status.chars().count() as u16 + 4)
         .min((inner.width / 2).max(10))
         .min(inner.width);
